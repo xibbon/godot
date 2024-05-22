@@ -616,6 +616,8 @@ void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 				stvar.type = 3;
 
 				send_message("evaluation_return", stvar.serialize());
+			} else if (command == "close_debug_session") {
+				peer->close();
 			} else {
 				bool captured = false;
 				ERR_CONTINUE(_try_capture(command, data, captured) != OK);

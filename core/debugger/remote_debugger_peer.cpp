@@ -208,6 +208,7 @@ void RemoteDebuggerPeerTCP::_thread_func(void *p_ud) {
 			OS::get_singleton()->delay_usec(min_tick - ticks_usec);
 		}
 	}
+	peer->connected = false;
 }
 
 void RemoteDebuggerPeerTCP::poll() {
