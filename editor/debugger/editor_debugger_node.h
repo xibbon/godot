@@ -119,6 +119,8 @@ private:
 
 	HashSet<Ref<EditorDebuggerPlugin>> debugger_plugins;
 
+	Callable paused_callback;
+
 	ScriptEditorDebugger *_add_debugger();
 	void _update_errors();
 	void _update_margins();
@@ -155,7 +157,7 @@ protected:
 	void _stack_frame_selected(int p_debugger);
 	void _error_selected(const String &p_file, int p_line, int p_debugger);
 	void _breaked(bool p_breaked, bool p_can_debug, const String &p_message, bool p_has_stackdump, int p_debugger);
-	void _paused();
+	void _paused(bool p_paused);
 	void _break_state_changed();
 	void _menu_option(int p_id);
 	void _update_debug_options();
@@ -179,6 +181,10 @@ public:
 	void debug_continue();
 
 	void set_script_debug_button(MenuButton *p_button);
+
+	void set_paused_callback(const Callable &p_callback) {
+		paused_callback = p_callback;
+	}
 
 	String get_var_value(const String &p_var) const;
 	Ref<Script> get_dump_stack_script() const { return stack_script; } // Why do we need this?
@@ -227,4 +233,6 @@ public:
 	bool plugins_capture(ScriptEditorDebugger *p_debugger, const String &p_message, const Array &p_data);
 	void add_debugger_plugin(const Ref<EditorDebuggerPlugin> &p_plugin);
 	void remove_debugger_plugin(const Ref<EditorDebuggerPlugin> &p_plugin);
+
+	void close_debug_session();
 };
