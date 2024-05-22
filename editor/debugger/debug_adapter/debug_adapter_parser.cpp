@@ -291,7 +291,6 @@ Dictionary DebugAdapterParser::req_configurationDone(const Dictionary &p_params)
 
 Dictionary DebugAdapterParser::req_pause(const Dictionary &p_params) const {
 	EditorRunBar::get_singleton()->get_pause_button()->set_pressed(true);
-	EditorDebuggerNode::get_singleton()->_paused();
 
 	DebugAdapterProtocol::get_singleton()->notify_stopped_paused();
 
@@ -300,7 +299,6 @@ Dictionary DebugAdapterParser::req_pause(const Dictionary &p_params) const {
 
 Dictionary DebugAdapterParser::req_continue(const Dictionary &p_params) const {
 	EditorRunBar::get_singleton()->get_pause_button()->set_pressed(false);
-	EditorDebuggerNode::get_singleton()->_paused();
 
 	DebugAdapterProtocol::get_singleton()->notify_continued();
 

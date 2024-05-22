@@ -107,7 +107,7 @@ EditorDebuggerNode::EditorDebuggerNode() {
 		return;
 	}
 
-	EditorRunBar::get_singleton()->get_pause_button()->connect(SceneStringName(pressed), callable_mp(this, &EditorDebuggerNode::_paused));
+	EditorRunBar::get_singleton()->get_pause_button()->connect(SceneStringName(toggled), callable_mp(this, &EditorDebuggerNode::_paused));
 }
 
 ScriptEditorDebugger *EditorDebuggerNode::_add_debugger() {
@@ -674,12 +674,14 @@ void EditorDebuggerNode::_update_debug_options() {
 	}
 }
 
-void EditorDebuggerNode::_paused() {
-	const bool paused = EditorRunBar::get_singleton()->get_pause_button()->is_pressed();
+void EditorDebuggerNode::_paused(bool p_paused) {
+	if (paused_callback.is_valid()) {
+		paused_callback.call(p_paused);
+	}
 	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
-		if (paused && !dbg->is_breaked()) {
+		if (p_paused && !dbg->is_breaked()) {
 			dbg->debug_break();
-		} else if (!paused && dbg->is_breaked()) {
+		} else if (!p_paused && dbg->is_breaked()) {
 			dbg->debug_continue();
 		}
 	});
@@ -1026,4 +1028,10 @@ bool EditorDebuggerNode::plugins_capture(ScriptEditorDebugger *p_debugger, const
 		}
 	}
 	return parsed;
+}
+
+void EditorDebuggerNode::close_debug_session() {
+	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
+		dbg->send_message("close_debug_session", Array());
+	});
 }
