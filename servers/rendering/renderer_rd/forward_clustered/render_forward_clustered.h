@@ -34,7 +34,7 @@
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
-#ifdef METAL_ENABLED
+#if defined(METAL_ENABLED) && !defined(IOS_SIMULATOR)
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
 #endif
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
