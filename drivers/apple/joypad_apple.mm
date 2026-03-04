@@ -31,9 +31,11 @@
 #import "joypad_apple.h"
 
 #import <CoreHaptics/CoreHaptics.h>
+#import <dispatch/dispatch.h>
 #import <os/log.h>
 
 #include "core/config/project_settings.h"
+#include "core/os/thread.h"
 #include "main/main.h"
 
 class API_AVAILABLE(macos(11), ios(14.0), tvos(14.0)) RumbleMotor {
@@ -484,12 +486,25 @@ GCControllerPlayerIndex JoypadApple::get_free_player_index() {
 }
 
 void JoypadApple::add_joypad(GCController *p_controller) {
+	if (!p_controller) {
+		return;
+	}
+	if (!Thread::is_main_thread()) {
+		GCController *controller = p_controller;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			add_joypad(controller);
+		});
+		return;
+	}
+	Input *input = Input::get_singleton();
+	ERR_FAIL_NULL(input);
+
 	if (controller_to_joy_id.has(p_controller)) {
 		return;
 	}
 
 	// Get a new id for our controller.
-	int joy_id = Input::get_singleton()->get_unused_joy_id();
+	int joy_id = input->get_unused_joy_id();
 
 	if (joy_id == -1) {
 		print_verbose("Couldn't retrieve new joy ID.");
@@ -508,7 +523,7 @@ void JoypadApple::add_joypad(GCController *p_controller) {
 	} else {
 		device_name = p_controller.vendorName.UTF8String;
 	}
-	Input::get_singleton()->joy_connection_changed(joy_id, true, String::utf8(device_name));
+	input->joy_connection_changed(joy_id, true, String::utf8(device_name));
 
 	// Assign our player index.
 	joypads.insert(joy_id, memnew(GameController(joy_id, p_controller)));
@@ -516,6 +531,19 @@ void JoypadApple::add_joypad(GCController *p_controller) {
 }
 
 void JoypadApple::remove_joypad(GCController *p_controller) {
+	if (!p_controller) {
+		return;
+	}
+	if (!Thread::is_main_thread()) {
+		GCController *controller = p_controller;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			remove_joypad(controller);
+		});
+		return;
+	}
+	Input *input = Input::get_singleton();
+	ERR_FAIL_NULL(input);
+
 	if (!controller_to_joy_id.has(p_controller)) {
 		return;
 	}
@@ -524,7 +552,7 @@ void JoypadApple::remove_joypad(GCController *p_controller) {
 	controller_to_joy_id.erase(p_controller);
 
 	// Tell Godot this joystick is no longer there.
-	Input::get_singleton()->joy_connection_changed(joy_id, false, "");
+	input->joy_connection_changed(joy_id, false, "");
 
 	// And remove it from our dictionary.
 	GameController **old = joypads.getptr(joy_id);
