@@ -338,7 +338,7 @@ void MetalDeviceProperties::init_limits(MTL::Device *p_device) {
 
 	limits.maxDrawIndexedIndexValue = std::numeric_limits<uint32_t>::max() - 1;
 
-#ifdef METAL_MFXTEMPORAL_ENABLED
+#if defined(METAL_MFXTEMPORAL_ENABLED) && !defined(IOS_SIMULATOR)
 	if (__builtin_available(macOS 14.0, iOS 17.0, tvOS 17.0, *)) {
 		limits.temporalScalerInputContentMinScale = MTLFX::TemporalScalerDescriptor::supportedInputContentMinScale(p_device);
 		limits.temporalScalerInputContentMaxScale = MTLFX::TemporalScalerDescriptor::supportedInputContentMaxScale(p_device);
