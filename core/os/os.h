@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/config/engine.h"
+#include "core/input/virtual_controller.h"
 #include "core/io/logger.h"
 #include "core/io/remote_filesystem_client.h"
 #include "core/os/process_id.h"
@@ -408,6 +409,10 @@ public:
 				ERR_FAIL_V_MSG("", vformat("Couldn't find a string for platform string: %d.", p_platform_string));
 		}
 	}
+
+	virtual Ref<VirtualController> get_virtual_controller() const;
+
+	virtual void start_modules() const {}
 
 #ifdef TOOLS_ENABLED
 	// Tests OpenGL context and Rendering Device simultaneous creation. This function is expected to crash on some NVIDIA drivers.

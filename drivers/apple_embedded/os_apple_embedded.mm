@@ -242,6 +242,7 @@ bool OS_AppleEmbedded::iterate() {
 void OS_AppleEmbedded::start() {
 	if (Main::start() == EXIT_SUCCESS) {
 		main_loop->initialize();
+		start_modules();
 	}
 }
 
