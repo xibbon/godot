@@ -49,4 +49,22 @@ String OS_IOS::get_name() const {
 	return "iOS";
 }
 
+void OS_IOS::ensure_virtual_controller() {
+	if (virtual_controller.is_null()) {
+		virtual_controller = Ref<IOSVirtualController>(memnew(IOSVirtualController));
+	}
+}
+
+Ref<VirtualController> OS_IOS::get_virtual_controller() const {
+	const_cast<OS_IOS *>(this)->ensure_virtual_controller();
+	return virtual_controller;
+}
+
+void OS_IOS::start_modules() const {
+	const_cast<OS_IOS *>(this)->ensure_virtual_controller();
+	if (virtual_controller.is_valid()) {
+		virtual_controller->initialize();
+	}
+}
+
 #endif // IOS_ENABLED

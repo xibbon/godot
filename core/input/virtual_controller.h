@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  os_ios.h                                                              */
+/*  virtual_controller.h                                                  */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,29 +28,38 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#ifndef VIRTUAL_CONTROLLER_H
+#define VIRTUAL_CONTROLLER_H
 
-#ifdef IOS_ENABLED
+#include "core/object/class_db.h"
+#include "core/object/ref_counted.h"
 
-#import "virtual_controller_ios.h"
+class VirtualController : public RefCounted {
+	GDCLASS(VirtualController, RefCounted);
 
-#import "drivers/apple_embedded/os_apple_embedded.h"
+protected:
+	static void _bind_methods();
 
-class OS_IOS : public OS_AppleEmbedded {
-private:
-	mutable Ref<IOSVirtualController> virtual_controller;
-
-	void ensure_virtual_controller();
+	static inline Callable virtual_controller_created_callback;
 
 public:
-	static OS_IOS *get_singleton();
+	virtual void enable() = 0;
+	virtual void disable() = 0;
+	virtual bool is_enabled() = 0;
+	virtual void set_enabled_left_thumbstick(bool p_enabled) = 0;
+	virtual bool is_enabled_left_thumbstick() = 0;
+	virtual void set_enabled_right_thumbstick(bool p_enabled) = 0;
+	virtual bool is_enabled_right_thumbstick() = 0;
+	virtual void set_enabled_button_a(bool p_enabled) = 0;
+	virtual bool is_enabled_button_a() = 0;
+	virtual void set_enabled_button_b(bool p_enabled) = 0;
+	virtual bool is_enabled_button_b() = 0;
+	virtual void set_enabled_button_x(bool p_enabled) = 0;
+	virtual bool is_enabled_button_x() = 0;
+	virtual void set_enabled_button_y(bool p_enabled) = 0;
+	virtual bool is_enabled_button_y() = 0;
 
-	OS_IOS();
-	~OS_IOS();
-
-	virtual String get_name() const override;
-	virtual Ref<VirtualController> get_virtual_controller() const override;
-	virtual void start_modules() const override;
+	static void set_virtual_controller_creation_callback(Callable p_virtual_controller_created);
 };
 
-#endif // IOS_ENABLED
+#endif // VIRTUAL_CONTROLLER_H

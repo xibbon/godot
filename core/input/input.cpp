@@ -167,6 +167,7 @@ void Input::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("parse_input_event", "event"), &Input::parse_input_event);
 	ClassDB::bind_method(D_METHOD("set_use_accumulated_input", "enable"), &Input::set_use_accumulated_input);
 	ClassDB::bind_method(D_METHOD("is_using_accumulated_input"), &Input::is_using_accumulated_input);
+	ClassDB::bind_method(D_METHOD("get_virtual_controller"), &Input::get_virtual_controller);
 	ClassDB::bind_method(D_METHOD("flush_buffered_events"), &Input::flush_buffered_events);
 	ClassDB::bind_method(D_METHOD("set_emulate_mouse_from_touch", "enable"), &Input::set_emulate_mouse_from_touch);
 	ClassDB::bind_method(D_METHOD("is_emulating_mouse_from_touch"), &Input::is_emulating_mouse_from_touch);
@@ -1162,6 +1163,10 @@ void Input::set_emulate_touch_from_mouse(bool p_emulate) {
 
 bool Input::is_emulating_touch_from_mouse() const {
 	return emulate_touch_from_mouse;
+}
+
+Ref<VirtualController> Input::get_virtual_controller() {
+	return OS::get_singleton()->get_virtual_controller();
 }
 
 // Calling this whenever the game window is focused helps unsticking the "touch mouse"

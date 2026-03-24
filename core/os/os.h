@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/config/engine.h"
+#include "core/input/virtual_controller.h"
 #include "core/io/logger.h"
 #include "core/io/remote_filesystem_client.h"
 #include "core/os/time_enums.h"
@@ -374,6 +375,10 @@ public:
 	// Load GDExtensions specific to this platform.
 	// This is invoked by the GDExtensionManager after loading GDExtensions specified by the project.
 	virtual void load_platform_gdextensions() const {}
+
+	virtual Ref<VirtualController> get_virtual_controller() const;
+
+	virtual void start_modules() const {}
 
 #ifdef TOOLS_ENABLED
 	// Tests OpenGL context and Rendering Device simultaneous creation. This function is expected to crash on some NVIDIA drivers.
