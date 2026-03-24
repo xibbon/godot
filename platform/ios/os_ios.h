@@ -32,9 +32,16 @@
 
 #ifdef IOS_ENABLED
 
+#import "virtual_controller_ios.h"
+
 #import "drivers/apple_embedded/os_apple_embedded.h"
 
 class OS_IOS : public OS_AppleEmbedded {
+private:
+	mutable Ref<IOSVirtualController> virtual_controller;
+
+	void ensure_virtual_controller();
+
 public:
 	static OS_IOS *get_singleton();
 
@@ -42,6 +49,8 @@ public:
 	~OS_IOS();
 
 	virtual String get_name() const override;
+	virtual Ref<VirtualController> get_virtual_controller() const override;
+	virtual void start_modules() const override;
 };
 
 #endif // IOS_ENABLED
