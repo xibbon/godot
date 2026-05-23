@@ -141,7 +141,7 @@ bool IPAddress::_parse_ipv6(const String &p_string, IPAddress &r_ip) {
 	// Shift bytes.
 	int pad = 8 - cur;
 	int blank_end = shift + pad;
-	for (int i = 7; i > shift; i--) {
+	for (int i = 7; i >= shift; i--) {
 		if (i < blank_end) {
 			r_ip.field16[i] = 0;
 		} else {
