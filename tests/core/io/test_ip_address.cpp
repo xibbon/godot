@@ -264,6 +264,8 @@ TEST_CASE("[IPAddress] IPv6 Parsing") {
 	CHECK(test_ip("1:1:1::", { 1, 1, 1, 0, 0, 0, 0, 0 }));
 	CHECK(test_ip("1:1::", { 1, 1, 0, 0, 0, 0, 0, 0 }));
 	CHECK(test_ip("1::", { 1, 0, 0, 0, 0, 0, 0, 0 }));
+	CHECK(test_ip("1::2", { 1, 0, 0, 0, 0, 0, 0, 2 }));
+	CHECK(test_ip("fdd1:a5db:2079::2", { 0xFDD1, 0xA5DB, 0x2079, 0, 0, 0, 0, 2 }));
 
 	CHECK(test_ip("1::1", { 1, 0, 0, 0, 0, 0, 0, 1 }));
 	CHECK(test_ip("1:1:1:1:1::1", { 1, 1, 1, 1, 1, 0, 0, 1 }));
