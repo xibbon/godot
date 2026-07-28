@@ -210,6 +210,9 @@ typedef struct SpvReflectPrvParser {
   const char*                     source_embedded;
   size_t                          node_count;
   SpvReflectPrvNode*              nodes;
+  // Maps a result ID to its node index plus one. Zero means no node.
+  uint32_t                        id_bound;
+  uint32_t*                       node_index_by_id;
   uint32_t                        entry_point_count;
   uint32_t                        capability_count;
   uint32_t                        function_count;
@@ -505,15 +508,11 @@ static bool IsSpecConstant(const SpvReflectPrvNode* p_node) {
 }
 
 static SpvReflectPrvNode* FindNode(SpvReflectPrvParser* p_parser, uint32_t result_id) {
-  SpvReflectPrvNode* p_node = NULL;
-  for (size_t i = 0; i < p_parser->node_count; ++i) {
-    SpvReflectPrvNode* p_elem = &(p_parser->nodes[i]);
-    if (p_elem->result_id == result_id) {
-      p_node = p_elem;
-      break;
-    }
+  if (result_id == 0 || result_id >= p_parser->id_bound) {
+    return NULL;
   }
-  return p_node;
+  uint32_t index_plus_one = p_parser->node_index_by_id[result_id];
+  return index_plus_one ? &(p_parser->nodes[index_plus_one - 1]) : NULL;
 }
 
 static SpvReflectTypeDescription* FindType(SpvReflectShaderModule* p_module, uint32_t type_id) {
@@ -653,6 +652,8 @@ static void DestroyParser(SpvReflectPrvParser* p_parser) {
     }
 
     SafeFree(p_parser->nodes);
+    SafeFree(p_parser->node_index_by_id);
+    p_parser->id_bound = 0;
     SafeFree(p_parser->strings);
     SafeFree(p_parser->source_embedded);
     SafeFree(p_parser->functions);
@@ -696,6 +697,15 @@ static SpvReflectResult ParseNodes(SpvReflectPrvParser* p_parser) {
   p_parser->node_count = node_count;
   p_parser->nodes = (SpvReflectPrvNode*)calloc(p_parser->node_count, sizeof(*(p_parser->nodes)));
   if (IsNull(p_parser->nodes)) {
+    return SPV_REFLECT_RESULT_ERROR_ALLOC_FAILED;
+  }
+  // The SPIR-V header provides an exclusive upper bound for result IDs.
+  p_parser->id_bound = p_spirv[3];
+  if (p_parser->id_bound == 0) {
+    return SPV_REFLECT_RESULT_ERROR_SPIRV_INVALID_ID_REFERENCE;
+  }
+  p_parser->node_index_by_id = (uint32_t*)calloc(p_parser->id_bound, sizeof(*(p_parser->node_index_by_id)));
+  if (IsNull(p_parser->node_index_by_id)) {
     return SPV_REFLECT_RESULT_ERROR_ALLOC_FAILED;
   }
   // Mark all nodes with an invalid state
@@ -997,6 +1007,12 @@ static SpvReflectResult ParseNodes(SpvReflectPrvParser* p_parser) {
       case SpvOpSDiv: {
         CHECKED_READU32(p_parser, p_node->word_offset + 2, p_node->result_id);
       } break;
+    }
+
+    // IDs are unique, except OpTypeForwardPointer, where a later
+    // OpTypePointer uses the same ID. The later node must replace the first.
+    if (p_node->result_id != 0 && p_node->result_id < p_parser->id_bound) {
+      p_parser->node_index_by_id[p_node->result_id] = node_index + 1;
     }
 
     if (p_node->is_type) {
