@@ -148,6 +148,31 @@ void godot_icall_Internal_ReloadAssemblies(bool p_soft_reload) {
 #endif
 }
 
+// Unlike the call above, this one always reaches CSharpLanguage and therefore
+// always produces an XogotAssemblyReloaded callback. Xogot's build coordinator
+// depends on that callback to leave its `reloading` state.
+void godot_icall_Internal_XogotReloadAssemblies() {
+#ifdef GD_MONO_HOT_RELOAD
+	callable_mp(MonoBind::GodotSharp::get_singleton(), &MonoBind::GodotSharp::xogot_reload_assemblies).call_deferred();
+#else
+	// Nothing can reload, but the caller is holding a build open until it hears
+	// back. Answer immediately rather than leaving it stuck.
+	CSharpLanguage *language = CSharpLanguage::get_singleton();
+	if (language != nullptr && language->get_godotsharp_editor() != nullptr) {
+		language->get_godotsharp_editor()->call("XogotAssemblyReloaded", true);
+	}
+#endif
+}
+
+void godot_icall_Internal_XogotNotifyBuildState(const godot_string *p_state) {
+	if (EditorNode::get_singleton() == nullptr) {
+		return;
+	}
+	const String state = *reinterpret_cast<const String *>(p_state);
+	EditorNode::get_singleton()->call_deferred(
+		SNAME("emit_signal"), SNAME("callout"), SNAME("dotnet_build_state_changed"), state);
+}
+
 void godot_icall_Internal_EditorDebuggerNodeReloadScripts() {
 	EditorDebuggerNode::get_singleton()->reload_all_scripts();
 }
@@ -265,6 +290,8 @@ static const void *unmanaged_callbacks[]{
 	(void *)godot_icall_Internal_GodotMainIteration,
 	(void *)godot_icall_Internal_IsAssembliesReloadingNeeded,
 	(void *)godot_icall_Internal_ReloadAssemblies,
+	(void *)godot_icall_Internal_XogotReloadAssemblies,
+	(void *)godot_icall_Internal_XogotNotifyBuildState,
 	(void *)godot_icall_Internal_EditorDebuggerNodeReloadScripts,
 	(void *)godot_icall_Internal_ScriptEditorEdit,
 	(void *)godot_icall_Internal_EditorNodeShowScriptScreen,

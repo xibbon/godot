@@ -2599,6 +2599,16 @@ Variant CSharpScript::callp(const StringName &p_method, const Variant **p_args, 
 }
 
 Error CSharpScript::reload(bool p_keep_state) {
+	// The .NET runtime is optional at run time: a template build only initializes GDMono when
+	// `should_initialize()` says so, but the C# resource loader still loads `.cs` files. With no
+	// runtime, `managed_callbacks` is zeroed, so the call below would jump through a null
+	// pointer and take the game down with SIGSEGV while loading the first script. Report an
+	// invalid script instead — `can_instantiate()` already explains that to the user.
+	if (!GDMonoCache::godot_api_cache_updated) {
+		valid = false;
+		return ERR_UNAVAILABLE;
+	}
+
 	if (!reload_invalidated) {
 		return OK;
 	}

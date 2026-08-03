@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using GodotTools.Build;
 using GodotTools.Ides;
 using GodotTools.Ides.Rider;
@@ -52,9 +53,9 @@ namespace GodotTools
         private WeakRef _inspectorPluginWeak;
 
         public GodotIdeManager GodotIdeManager { get; private set; }
-
-        public MSBuildPanel MSBuildPanel { get; private set; }
 #nullable enable
+
+        public MSBuildPanel? MSBuildPanel { get; private set; }
 
         public bool SkipBuildBeforePlaying { get; set; } = false;
 
@@ -83,6 +84,10 @@ namespace GodotTools
 
                 if (guid.Length > 0)
                 {
+                    // DetermineProjectLocation intentionally avoids adding .NET settings to a
+                    // non-C# project. Now that the csproj exists, persist its assembly name.
+                    ProjectSettings.SetSetting("dotnet/project/assembly_name", name);
+
                     var solution = new DotNetSolution(name, slnDir);
 
                     var projectInfo = new DotNetSolution.ProjectInfo(guid,
@@ -118,8 +123,8 @@ namespace GodotTools
 
         private void _ShowDotnetFeatures()
         {
-            MSBuildPanel.Open();
-            _toolBarBuildButton.Show();
+            MSBuildPanel?.Open();
+            _toolBarBuildButton?.Show();
         }
 
         private void _MenuOptionPressed(long id)
@@ -151,7 +156,114 @@ namespace GodotTools
                     return; // Failed to create project.
             }
 
-            Instance.MSBuildPanel.BuildProject();
+            _ = Instance.BuildProjectAndReload(rebuild: false);
+        }
+
+        private bool BuildProjectAndReload(bool rebuild)
+        {
+            if (!BuildManager.BuildProjectBlocking("Debug", rebuild: rebuild))
+                return false;
+
+            Internal.EditorDebuggerNodeReloadScripts();
+            GetNode<HotReloadAssemblyWatcher>("HotReloadAssemblyWatcher").RestartTimer();
+
+            if (Internal.IsAssembliesReloadingNeeded())
+            {
+                BuildManager.UpdateLastValidBuildDateTime();
+                Internal.ReloadAssemblies(softReload: false);
+            }
+
+            return true;
+        }
+
+        private async Task<bool> BuildProjectAndReloadAsync(bool rebuild)
+        {
+            if (!await BuildManager.BuildProjectAsync("Debug", rebuild: rebuild,
+                    holdSuccessfulSnapshotForAssemblyReload: true))
+                return false;
+
+            try
+            {
+                Internal.EditorDebuggerNodeReloadScripts();
+                GetNode<HotReloadAssemblyWatcher>("HotReloadAssemblyWatcher").RestartTimer();
+
+                // Xogot starts the game as soon as this asynchronous operation reports
+                // success. MSBuild may legitimately leave the DLL timestamp unchanged,
+                // but the editor can still lack the script registrations for that DLL
+                // (for example after managed tools start late). Always reload here and
+                // wait for the native completion callback before allowing Play to proceed.
+                //
+                // XogotReloadAssemblies, not ReloadAssemblies: the latter drops the
+                // request when the assembly timestamp did not move, so no completion
+                // callback arrives and the build stays `reloading` forever.
+                BuildManager.UpdateLastValidBuildDateTime();
+                Internal.XogotReloadAssemblies();
+            }
+            catch (Exception e)
+            {
+                string message = $"The project built, but Godot could not prepare its assembly: {e.Message}";
+                BuildManager.CompleteXogotBuildAfterAssemblyReload(success: false, failureMessage: message);
+                GD.PrintErr(message);
+                return false;
+            }
+
+            return true;
+        }
+
+        // Called by the native reload path after it either accepts or rejects the
+        // project assembly. Xogot uses this as the terminal state for Play.
+        [UsedImplicitly]
+        public void XogotAssemblyReloaded(bool success)
+        {
+            BuildManager.CompleteXogotBuildAfterAssemblyReload(success,
+                success ? string.Empty : "Godot failed to load the built project assembly.");
+        }
+
+        // Xogot hosts Godot's editor UI in SwiftUI, so the normal MSBuild panel and
+        // toolbar are not reachable. Keep the build implementation in GodotTools
+        // (where project migration, logging, hot reload and assembly reload already
+        // live) and expose only this small callable surface to EditorXogot.
+        [UsedImplicitly]
+        public bool XogotBuildProject(bool rebuild)
+        {
+            if (!CreateProjectSolutionIfNeeded())
+                return false;
+
+            return BuildProjectAndReload(rebuild);
+        }
+
+        [UsedImplicitly]
+        public bool XogotStartBuild(bool rebuild)
+        {
+            if (!CreateProjectSolutionIfNeeded() || BuildManager.BuildInProgress)
+                return false;
+
+            _ = BuildProjectAndReloadAsync(rebuild);
+            return true;
+        }
+
+        [UsedImplicitly]
+        public bool XogotCancelBuild() => BuildManager.CancelBuild();
+
+        [UsedImplicitly]
+        public bool XogotNeedsBuildBeforeRun() => BuildManager.IsProjectBuildOutOfDate();
+
+        [UsedImplicitly]
+        public void XogotSkipNextBuildBeforePlaying() => SkipBuildBeforePlaying = true;
+
+        [UsedImplicitly]
+        public Godot.Collections.Dictionary XogotGetLastBuildResult() => BuildManager.GetLastBuildResult();
+
+        [UsedImplicitly]
+        public Godot.Collections.Dictionary XogotGetProjectInfo()
+        {
+            return new Godot.Collections.Dictionary
+            {
+                ["project"] = GodotSharpDirs.ProjectCsProjPath,
+                ["solution"] = GodotSharpDirs.ProjectSlnPath,
+                ["assembly_name"] = GodotSharpDirs.ProjectAssemblyName,
+                ["logs"] = GodotSharpDirs.LogsDirPathFor("Debug"),
+            };
         }
 
         private enum MenuOptions
@@ -504,8 +616,11 @@ namespace GodotTools
             _confirmCreateSlnDialog.SetUnparentWhenInvisible(true);
             _confirmCreateSlnDialog.Confirmed += () => CreateProjectSolution();
 
-            MSBuildPanel = new MSBuildPanel();
-            AddDock(MSBuildPanel);
+            if (!BuildManager.IsXogotEmbedded)
+            {
+                MSBuildPanel = new MSBuildPanel();
+                AddDock(MSBuildPanel);
+            }
 
             AddChild(new HotReloadAssemblyWatcher { Name = "HotReloadAssemblyWatcher" });
 
@@ -517,21 +632,24 @@ namespace GodotTools
 
             AddToolSubmenuItem("C#", _menuPopup);
 
-            _toolBarBuildButton = new Button
+            if (!BuildManager.IsXogotEmbedded)
             {
-                Flat = false,
-                Icon = EditorInterface.Singleton.GetEditorTheme().GetIcon("BuildCSharp", "EditorIcons"),
-                FocusMode = Control.FocusModeEnum.None,
-                Shortcut = EditorDefShortcut("mono/build_solution", "Build Project".TTR(), (Key)KeyModifierMask.MaskAlt | Key.B),
-                ShortcutInTooltip = true,
-                ThemeTypeVariation = "RunBarButton",
-            };
-            EditorShortcutOverride("mono/build_solution", "macos", (Key)KeyModifierMask.MaskMeta | (Key)KeyModifierMask.MaskCtrl | Key.B);
+                _toolBarBuildButton = new Button
+                {
+                    Flat = false,
+                    Icon = EditorInterface.Singleton.GetEditorTheme().GetIcon("BuildCSharp", "EditorIcons"),
+                    FocusMode = Control.FocusModeEnum.None,
+                    Shortcut = EditorDefShortcut("mono/build_solution", "Build Project".TTR(), (Key)KeyModifierMask.MaskAlt | Key.B),
+                    ShortcutInTooltip = true,
+                    ThemeTypeVariation = "RunBarButton",
+                };
+                EditorShortcutOverride("mono/build_solution", "macos", (Key)KeyModifierMask.MaskMeta | (Key)KeyModifierMask.MaskCtrl | Key.B);
 
-            _toolBarBuildButton.Pressed += BuildProjectPressed;
-            Internal.EditorPlugin_AddControlToEditorRunBar(_toolBarBuildButton);
-            // Move Build button so it appears to the left of the Play button.
-            _toolBarBuildButton.GetParent().MoveChild(_toolBarBuildButton, 0);
+                _toolBarBuildButton.Pressed += BuildProjectPressed;
+                Internal.EditorPlugin_AddControlToEditorRunBar(_toolBarBuildButton);
+                // Move Build button so it appears to the left of the Play button.
+                _toolBarBuildButton.GetParent().MoveChild(_toolBarBuildButton, 0);
+            }
 
             if (File.Exists(GodotSharpDirs.ProjectCsProjPath))
             {
@@ -539,8 +657,8 @@ namespace GodotTools
             }
             else
             {
-                MSBuildPanel.Close();
-                _toolBarBuildButton.Hide();
+                MSBuildPanel?.Close();
+                _toolBarBuildButton?.Hide();
             }
             _menuPopup.AddItem("Create C# solution".TTR(), (int)MenuOptions.CreateSln);
 
