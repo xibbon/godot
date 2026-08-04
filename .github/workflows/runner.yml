@@ -35,6 +35,11 @@ jobs:
     needs: static-checks
     uses: ./.github/workflows/macos_builds.yml
 
+  dotnet-build:
+    name: 🟣 .NET
+    needs: static-checks
+    uses: ./.github/workflows/dotnet_builds.yml
+
   windows-build:
     name: 🏁 Windows
     needs: static-checks

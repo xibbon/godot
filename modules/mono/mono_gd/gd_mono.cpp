@@ -626,7 +626,27 @@ bool GDMono::should_initialize() {
 	// find_hostfxr() looks next, so treat its presence as the signal. Without this the runtime
 	// stays down and the first `.cs` the resource loader touches takes the game with it.
 	const String publish_dir = "res://.godot/mono/publish/" + Engine::get_singleton()->get_architecture_name();
-	return DirAccess::exists(publish_dir);
+	if (DirAccess::exists(publish_dir)) {
+		return true;
+	}
+
+#if defined(APPLE_EMBEDDED_ENABLED)
+	// A NativeAOT payload injected beside the executable rather than packed. Xogot's fast deploy
+	// clones a prebuilt template `.app` and drops the compiled assembly in as a framework, so
+	// there is no publish directory to find — the framework *is* the payload. These are the same
+	// two locations `open_dynamic_library()` searches for it a moment later
+	// (`os_apple_embedded.mm`), so agreeing with it here keeps the gate and the load in step.
+	const String frameworks_dir = OS::get_singleton()->get_executable_path().get_base_dir().path_join("Frameworks");
+	const String assembly_name = Path::get_csharp_project_name();
+	if (!assembly_name.is_empty()) {
+		if (FileAccess::exists(frameworks_dir.path_join(assembly_name + ".framework").path_join(assembly_name)) ||
+				FileAccess::exists(frameworks_dir.path_join(assembly_name + ".dylib"))) {
+			return true;
+		}
+	}
+#endif
+
+	return false;
 #endif
 }
 
@@ -727,8 +747,20 @@ void GDMono::initialize() {
 	// When XOGOT_MANAGED_DEBUG_SOCKET is set, block here until the editor says it has attached.
 	// With the variable unset this is a no-op, so an ordinary exported game is unaffected.
 	String startup_barrier_error;
+#ifdef TOOLS_ENABLED
+	// The editor loads the project assembly below, so a failed barrier really does stop it.
 	ERR_FAIL_COND_MSG(!gdmono::wait_for_managed_debugger_startup(startup_barrier_error),
 			".NET: Managed debugger startup barrier failed: " + startup_barrier_error + ". The project assembly was not loaded.");
+#else
+	// In a template build the game assembly was already loaded by `godot_plugins_initialize`
+	// above, so the old "project assembly was not loaded" wording was simply wrong here. A failed
+	// barrier only means no debugger is attached; the game is perfectly able to keep running, and
+	// bailing out of `initialize()` would leave the managed callbacks half-configured.
+	if (!gdmono::wait_for_managed_debugger_startup(startup_barrier_error)) {
+		WARN_PRINT(".NET: Managed debugger startup barrier failed: " + startup_barrier_error +
+				". Continuing without a managed debugger.");
+	}
+#endif
 
 #ifdef TOOLS_ENABLED
 	_try_load_project_assembly();
