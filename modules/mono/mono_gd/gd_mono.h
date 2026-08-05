@@ -165,6 +165,11 @@ public:
 
 	void reload_assemblies(bool p_soft_reload);
 
+	// Xogot's build coordinator holds a successful build in its `reloading`
+	// state until CSharpLanguage reports the outcome back, so it needs a
+	// reload entry point that always reports, even when nothing is stale.
+	void xogot_reload_assemblies();
+
 	GodotSharp();
 	~GodotSharp();
 };

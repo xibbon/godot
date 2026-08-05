@@ -1,0 +1,221 @@
+name: 🟣 .NET Builds
+on:
+  workflow_call:
+  workflow_dispatch:
+
+# Two different things live here, and only the first one publishes anything:
+#
+#   * `dotnet-component` builds the managed half — GodotSharp, the editor tools, and the NuGet
+#     packages. These must come from this tree, because GodotTools talks to the Xogot editor over
+#     a positional callbacks table.
+#   * the `*-template-check` jobs only prove a mono-enabled engine still compiles. The shippable
+#     `-dotnet` template payloads are built and uploaded by the XogotExportTemplates repo.
+#
+# `module_mono_enabled=yes` is what separates a .NET template from a stock one. A stock template
+# has no GDMono compiled in at all, so a C# game deployed onto one cannot start its runtime; that
+# is why the .NET builds ship as separate `-dotnet` template revisions rather than replacing the
+# stock ones. See docs/dotnet-publish-requirements.md in the MacXogot repo.
+env:
+  SCONS_FLAGS: >-
+    dev_mode=yes
+    module_text_server_fb_enabled=yes
+    module_mono_enabled=yes
+    tests=no
+    werror=no
+
+jobs:
+  # The optional ".NET Support" component: GodotSharp assemblies, the editor tools, and the NuGet
+  # packages a game compiles against.
+  #
+  # These must come from *this* tree. GodotTools talks to the editor over a positional callbacks
+  # table, so assemblies built from a tree without Xogot's icalls fail with
+  # "Unmanaged callbacks size mismatch" and take the editor's entire .NET tooling down with them.
+  dotnet-component:
+    runs-on: macos-latest
+    name: .NET component (GodotSharp + nupkgs)
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: macos-dotnet-component
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # An editor binary is needed only to generate the C# glue; the glue is what the assemblies
+      # are then built from.
+      - name: Compilation (editor, mono)
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: ${{ env.SCONS_FLAGS }}
+          platform: macos
+          target: editor
+
+      - name: Generate mono glue
+        run: |
+          set -euo pipefail
+          editor=$(ls bin/godot.macos.editor.*.mono | head -1)
+          "$editor" --headless --generate-mono-glue ./modules/mono/glue
+
+      - name: Build assemblies and NuGet packages
+        run: |
+          set -euo pipefail
+          ./modules/mono/build_scripts/build_assemblies.py \
+            --godot-output-dir ./bin --godot-platform macos
+          ls -l bin/GodotSharp/Tools/nupkgs/
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: macos-dotnet-component
+        continue-on-error: true
+
+      - name: Upload artifact
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: dotnet-component-godotsharp
+          path: bin/GodotSharp
+
+  # Compile guards, not a publishing step.
+  #
+  # The shippable `-dotnet` template payloads are built and uploaded by the
+  # XogotExportTemplates repo, which clones this tree, assembles the xcframework
+  # and `game.app` shapes, pushes them to R2 and writes the manifest slots. It is
+  # the single place that knows the R2 layout and the revision-id convention, and
+  # duplicating the packaging here would let the two drift.
+  #
+  # What this repo owns is the question XogotExportTemplates cannot answer early:
+  # *does a mono-enabled template still compile from this tree at all?* That is
+  # not hypothetical — three defects (an unguarded `GDExtensionEditorPlugins` in
+  # main.cpp, `editor/editor_node.h` included outside `TOOLS_ENABLED` by the
+  # vorbis and mp3 importers, and the editor-only `xcallout` macro in
+  # dialogs.cpp) each broke every template build from this fork, and went
+  # unnoticed because nothing here ever built one. These jobs stop at the link
+  # step so the next such regression fails here, in minutes, rather than in the
+  # middle of a template release.
+  macos-dotnet-template-check:
+    runs-on: macos-latest
+    name: macOS template compiles (mono)
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: macos-dotnet-template
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      # `disable_path_overrides=no` is mandatory for the shipped debug template:
+      # Xogot's "My Mac" deploy launches it with `--path <project>`, and a
+      # template built without it refuses the flag outright. Built here too so
+      # the guard exercises the same configuration that ships.
+      - name: Compilation (template_debug, mono)
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: >-
+            ${{ env.SCONS_FLAGS }}
+            disable_path_overrides=no
+            vulkan=no
+            metal=yes
+          platform: macos
+          target: template_debug
+
+      - name: Verify GDMono linked in
+        run: |
+          set -euo pipefail
+          binary=$(ls bin/godot.macos.template_debug.*.mono | head -1)
+          count=$(nm "$binary" | grep -c 'GDMono\|hostfxr')
+          echo "$binary: $count mono symbols"
+          test "$count" -gt 0
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: macos-dotnet-template
+        continue-on-error: true
+
+  ios-dotnet-template-check:
+    runs-on: macos-latest
+    name: iOS template compiles (mono, ${{ matrix.name }})
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: device
+            scons-extra: ""
+          - name: simulator
+            scons-extra: "simulator=yes"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ios-dotnet-template-${{ matrix.name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Compilation (template_debug, mono)
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: >-
+            ${{ env.SCONS_FLAGS }}
+            disable_path_overrides=no
+            ${{ matrix.scons-extra }}
+          platform: ios
+          target: template_debug
+
+      # The iOS static library carries no ".mono" tag — LIBSUFFIX gets the
+      # platform/target/arch suffix but not `env.module_version_string`, which
+      # only reaches PROGSUFFIX. Checking symbols is therefore the only way to
+      # tell a mono iOS template apart from a stock one.
+      - name: Verify GDMono linked in
+        run: |
+          set -euo pipefail
+          library=$(ls bin/libgodot.ios.template_debug.*.a | head -1)
+          count=$(nm "$library" 2>/dev/null | grep -c 'GDMono' || true)
+          echo "$library: $count GDMono symbols"
+          test "$count" -gt 0
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ios-dotnet-template-${{ matrix.name }}
+        continue-on-error: true

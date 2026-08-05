@@ -244,6 +244,22 @@ namespace GodotTools.Export
 
             bool embedBuildResults = ((bool)GetOption("dotnet/embed_build_outputs") || platform == OS.Platforms.Android) && platform != OS.Platforms.MacOS;
 
+            // A pack/zip export consumes nothing this loop produces unless the results are being
+            // embedded. `AddFile` is the only route into a pack, and it is reached solely under
+            // `embedBuildResults`; `AddSharedObject` is dropped (`save_pack` leaves `so_files`
+            // null) and the Apple-embedded bundle/framework lists are read only by the
+            // Xcode-project exporter. So publishing here would compile and then discard — on iOS
+            // that is three NativeAOT links, the slowest step in the export, all on the main
+            // thread inside a synchronous engine callback.
+            //
+            // Called dynamically rather than through a generated binding so an older managed
+            // component paired with a newer engine simply keeps the previous behavior instead of
+            // failing to load. `_GetExportFeatures` and `_ExportFile` are deliberately untouched:
+            // the exported app still gets its `dotnet` feature tag, without which the template
+            // never initializes .NET at all, and C# sources are still stripped from the pack.
+            if (HasMethod("is_pack_only_export") && Call("is_pack_only_export").AsBool() && !embedBuildResults)
+                return;
+
             var exportedJars = new HashSet<string>();
 
             foreach (PublishConfig config in targets)
@@ -429,14 +445,34 @@ namespace GodotTools.Export
 
             if (platform == OS.Platforms.iOS)
             {
+                string baseDylib = $"{GodotSharpDirs.ProjectAssemblyName}.dylib";
+                string baseSym = $"{GodotSharpDirs.ProjectAssemblyName}.framework.dSYM";
+
+                // One entry per xcframework slice. Built explicitly rather than derived from the
+                // publish directories, so the lipo result below does not have to be written into
+                // one of them.
+                var slices = new List<(string Library, string DebugSymbols)>();
+
                 if (outputPaths.Count > 2)
                 {
-                    // lipo the simulator binaries together
+                    // The device slice keeps its publish directory; the simulator architectures
+                    // are lipo'd into one fat binary.
+                    slices.Add((Path.Combine(outputPaths[0], baseDylib), Path.Combine(outputPaths[0], baseSym)));
 
-                    string outputPath = Path.Combine(outputPaths[1], $"{GodotSharpDirs.ProjectAssemblyName}.dylib");
+                    // Written to a directory of its own. Writing it back over outputPaths[1]'s
+                    // dylib — which is also lipo's first input — left a fat binary sitting in a
+                    // persistent, non-temp publish directory. A later `dotnet publish` that finds
+                    // the link up to date does not overwrite it, and the next export then fails in
+                    // MachO::open_file, which rejects fat magic, surfacing as "Failed to 'lipo'
+                    // simulator binaries" with nothing obviously wrong.
+                    string universalDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath,
+                        "godot-publish-dotnet", $"{publishConfig.BuildConfig}-iossimulator-universal");
+                    Directory.CreateDirectory(universalDir);
+
+                    string outputPath = Path.Combine(universalDir, baseDylib);
                     string[] files = outputPaths
                         .Skip(1)
-                        .Select(path => Path.Combine(path, $"{GodotSharpDirs.ProjectAssemblyName}.dylib"))
+                        .Select(path => Path.Combine(path, baseDylib))
                         .ToArray();
 
                     if (!Internal.LipOCreateFile(outputPath, files))
@@ -444,11 +480,21 @@ namespace GodotTools.Export
                         throw new InvalidOperationException($"Failed to 'lipo' simulator binaries.");
                     }
 
-                    outputPaths.RemoveRange(2, outputPaths.Count - 2);
+                    // The symbols still come from the first simulator publish: lipo merges
+                    // binaries, not dSYM bundles, and the architectures share one symbol set per
+                    // slice as far as create-xcframework is concerned.
+                    slices.Add((outputPath, Path.Combine(outputPaths[1], baseSym)));
+                }
+                else
+                {
+                    foreach (string outputPath in outputPaths)
+                    {
+                        slices.Add((Path.Combine(outputPath, baseDylib), Path.Combine(outputPath, baseSym)));
+                    }
                 }
 
                 string xcFrameworkPath = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, publishConfig.BuildConfig, $"{GodotSharpDirs.ProjectAssemblyName}_aot.xcframework");
-                if (!BuildManager.GenerateXCFrameworkBlocking(outputPaths, xcFrameworkPath))
+                if (!BuildManager.GenerateXCFrameworkBlocking(slices, xcFrameworkPath))
                 {
                     throw new InvalidOperationException("Failed to generate xcframework.");
                 }
