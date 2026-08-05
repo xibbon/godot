@@ -67,11 +67,9 @@ namespace GodotTools.Internals
         public static void DetermineProjectLocation()
         {
             _projectAssemblyName = (string?)ProjectSettings.GetSetting("dotnet/project/assembly_name");
+            bool assemblyNameNeedsPersisting = string.IsNullOrEmpty(_projectAssemblyName);
             if (string.IsNullOrEmpty(_projectAssemblyName))
-            {
                 _projectAssemblyName = CSharpProjectName;
-                ProjectSettings.SetSetting("dotnet/project/assembly_name", _projectAssemblyName);
-            }
 
             string? slnParentDir = (string?)ProjectSettings.GetSetting("dotnet/project/solution_directory");
             if (string.IsNullOrEmpty(slnParentDir))
@@ -85,6 +83,12 @@ namespace GodotTools.Internals
             // Set csproj path first and use it to find the sln/slnx file with the assembly
             _projectCsProjPath = Path.Combine(ProjectSettings.GlobalizePath(csprojParentDir),
                 string.Concat(_projectAssemblyName, ".csproj"));
+
+            // GodotTools is also loaded for projects that do not use C#. Keep the derived name as
+            // an in-memory fallback, but do not dirty project.godot until a C# project actually
+            // exists. Creating a new C# project persists the setting after generating its csproj.
+            if (assemblyNameNeedsPersisting && File.Exists(_projectCsProjPath))
+                ProjectSettings.SetSetting("dotnet/project/assembly_name", _projectAssemblyName);
 
             _projectSlnPath = FindSolutionFileWithAssemblyName(slnParentDir, _projectAssemblyName);
         }

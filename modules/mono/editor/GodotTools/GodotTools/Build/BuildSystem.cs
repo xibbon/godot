@@ -6,7 +6,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using System.Xml.Linq;
 using Godot;
 using GodotTools.BuildLogger;
 using GodotTools.Internals;
@@ -17,6 +20,80 @@ namespace GodotTools.Build
 {
     public static class BuildSystem
     {
+        // The downloadable Xogot component carries the exact Godot NuGet packages
+        // that match the embedded engine. Development and prerelease engine builds
+        // are not necessarily published on nuget.org, so the project must use this
+        // source before MSBuild resolves the Godot.NET.Sdk declaration.
+        private const string XogotComponentNuGetSourceName = "xogot-dotnet-component";
+        private static readonly TimeSpan BuildCancellationGracePeriod = TimeSpan.FromSeconds(5);
+
+        // `dotnet build` is a console process. On the platforms Xogot embeds on, SIGINT lets
+        // dotnet/MSBuild flush its logs and clean up first; the delayed tree kill below is the
+        // hard stop for a compiler that ignores the request.
+        [DllImport("libc", SetLastError = true)]
+        private static extern int kill(int pid, int signal);
+
+        private static void EnsureXogotComponentNuGetSource(BuildInfo buildInfo)
+        {
+            if (!OperatingSystem.IsMacOS() ||
+                System.Environment.GetEnvironmentVariable("XOGOT_OPTIONAL_DOTNET_COMPONENT") != "1")
+            {
+                return;
+            }
+
+            string nupkgsDir = Path.Combine(Internals.GodotSharpDirs.DataEditorToolsDir, "nupkgs");
+            if (!System.IO.Directory.Exists(nupkgsDir))
+                return;
+
+            string? projectDir = Path.GetDirectoryName(buildInfo.Project);
+            if (string.IsNullOrEmpty(projectDir))
+                return;
+
+            // A project-local NuGet.Config also makes `dotnet build` work from an
+            // external terminal or IDE. Preserve all user sources and update only
+            // the source that Xogot owns, so component updates move it safely.
+            string configPath = Path.Combine(projectDir, "NuGet.Config");
+            if (!System.IO.File.Exists(configPath))
+            {
+                string lowercaseConfigPath = Path.Combine(projectDir, "nuget.config");
+                if (System.IO.File.Exists(lowercaseConfigPath))
+                    configPath = lowercaseConfigPath;
+            }
+
+            XDocument document = System.IO.File.Exists(configPath)
+                ? XDocument.Load(configPath, LoadOptions.PreserveWhitespace)
+                : new XDocument(new XElement("configuration"));
+
+            XElement configuration = document.Root
+                ?? throw new InvalidDataException($"NuGet configuration is empty: {configPath}");
+            if (!string.Equals(configuration.Name.LocalName, "configuration", StringComparison.Ordinal))
+                throw new InvalidDataException($"Invalid NuGet configuration root in {configPath}.");
+
+            XElement? packageSources = configuration.Element("packageSources");
+            if (packageSources == null)
+            {
+                packageSources = new XElement("packageSources");
+                configuration.Add(packageSources);
+            }
+
+            XElement? source = packageSources.Elements("add")
+                .FirstOrDefault(element => string.Equals(
+                    (string?)element.Attribute("key"),
+                    XogotComponentNuGetSourceName,
+                    StringComparison.Ordinal));
+            if (source == null)
+            {
+                source = new XElement("add", new XAttribute("key", XogotComponentNuGetSourceName));
+                packageSources.Add(source);
+            }
+
+            if (string.Equals((string?)source.Attribute("value"), nupkgsDir, StringComparison.Ordinal))
+                return;
+
+            source.SetAttributeValue("value", nupkgsDir);
+            document.Save(configPath);
+        }
+
         private static Process LaunchBuild(BuildInfo buildInfo, Action<string?>? stdOutHandler,
             Action<string?>? stdErrHandler)
         {
@@ -26,6 +103,8 @@ namespace GodotTools.Build
                 throw new FileNotFoundException("Cannot find the dotnet executable.");
 
             var editorSettings = EditorInterface.Singleton.GetEditorSettings();
+
+            EnsureXogotComponentNuGetSource(buildInfo);
 
             var startInfo = new ProcessStartInfo(dotnetPath);
 
@@ -78,13 +157,50 @@ namespace GodotTools.Build
         }
 
         public static async Task<int> BuildAsync(BuildInfo buildInfo, Action<string?>? stdOutHandler,
-            Action<string?>? stdErrHandler)
+            Action<string?>? stdErrHandler, CancellationToken cancellationToken = default)
         {
             using (var process = LaunchBuild(buildInfo, stdOutHandler, stdErrHandler))
             {
-                await process.WaitForExitAsync();
+                Task waitForExit = process.WaitForExitAsync();
+                if (cancellationToken.CanBeCanceled)
+                {
+                    Task cancellationRequested = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    if (await Task.WhenAny(waitForExit, cancellationRequested) != waitForExit && !process.HasExited)
+                    {
+                        TryInterrupt(process);
+                        if (await Task.WhenAny(waitForExit, Task.Delay(BuildCancellationGracePeriod)) != waitForExit &&
+                            !process.HasExited)
+                        {
+                            try
+                            {
+                                process.Kill(entireProcessTree: true);
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                // The process exited between HasExited and Kill.
+                            }
+                        }
+                    }
+                }
+
+                await waitForExit;
 
                 return process.ExitCode;
+            }
+        }
+
+        private static void TryInterrupt(Process process)
+        {
+            if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())
+                return;
+
+            try
+            {
+                _ = kill(process.Id, 2); // SIGINT
+            }
+            catch (InvalidOperationException)
+            {
+                // The process has already exited.
             }
         }
 
@@ -296,7 +412,7 @@ namespace GodotTools.Build
                 environmentVariables.Remove(env);
         }
 
-        private static Process DoGenerateXCFramework(List<string> outputPaths, string xcFrameworkPath,
+        private static Process DoGenerateXCFramework(List<(string Library, string DebugSymbols)> slices, string xcFrameworkPath,
             Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
         {
             if (Directory.Exists(xcFrameworkPath))
@@ -306,7 +422,7 @@ namespace GodotTools.Build
 
             var startInfo = new ProcessStartInfo("xcrun");
 
-            BuildXCFrameworkArguments(outputPaths, xcFrameworkPath, startInfo.ArgumentList);
+            BuildXCFrameworkArguments(slices, xcFrameworkPath, startInfo.ArgumentList);
 
             string launchMessage = startInfo.GetCommandLineDisplay(new StringBuilder("Packaging: ")).ToString();
             stdOutHandler?.Invoke(launchMessage);
@@ -341,9 +457,9 @@ namespace GodotTools.Build
             return process;
         }
 
-        public static int GenerateXCFramework(List<string> outputPaths, string xcFrameworkPath, Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
+        public static int GenerateXCFramework(List<(string Library, string DebugSymbols)> slices, string xcFrameworkPath, Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
         {
-            using (var process = DoGenerateXCFramework(outputPaths, xcFrameworkPath, stdOutHandler, stdErrHandler))
+            using (var process = DoGenerateXCFramework(slices, xcFrameworkPath, stdOutHandler, stdErrHandler))
             {
                 process.WaitForExit();
 
@@ -351,21 +467,18 @@ namespace GodotTools.Build
             }
         }
 
-        private static void BuildXCFrameworkArguments(List<string> outputPaths,
+        private static void BuildXCFrameworkArguments(List<(string Library, string DebugSymbols)> slices,
             string xcFrameworkPath, Collection<string> arguments)
         {
-            var baseDylib = $"{GodotSharpDirs.ProjectAssemblyName}.dylib";
-            var baseSym = $"{GodotSharpDirs.ProjectAssemblyName}.framework.dSYM";
-
             arguments.Add("xcodebuild");
             arguments.Add("-create-xcframework");
 
-            foreach (var outputPath in outputPaths)
+            foreach (var slice in slices)
             {
                 arguments.Add("-library");
-                arguments.Add(Path.Combine(outputPath, baseDylib));
+                arguments.Add(slice.Library);
                 arguments.Add("-debug-symbols");
-                arguments.Add(Path.Combine(outputPath, baseSym));
+                arguments.Add(slice.DebugSymbols);
             }
 
             arguments.Add("-output");

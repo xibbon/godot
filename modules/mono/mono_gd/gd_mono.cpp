@@ -37,6 +37,7 @@
 #include "../thirdparty/hostfxr.h"
 #include "../utils/path_utils.h"
 #include "gd_mono_cache.h"
+#include "managed_debugger_startup_barrier.h"
 
 #ifdef TOOLS_ENABLED
 #include "../editor/hostfxr_resolver.h"
@@ -612,7 +613,40 @@ bool GDMono::should_initialize() {
 	// The editor always needs to initialize the .NET module for now.
 	return true;
 #else
-	return OS::get_singleton()->has_feature("dotnet");
+	if (OS::get_singleton()->has_feature("dotnet")) {
+		return true;
+	}
+
+	// The `dotnet` feature tag is injected by the C# export plugin
+	// (GodotSharpExport._GetExportFeatures) and therefore only ever reaches us through a pack.
+	// A game started with `--path <project>` — which is how Xogot runs a project on the local
+	// machine — has no pack, so the tag is absent even though the project is full of C#.
+	//
+	// A published assemblies directory says the same thing the tag does, and it is exactly where
+	// find_hostfxr() looks next, so treat its presence as the signal. Without this the runtime
+	// stays down and the first `.cs` the resource loader touches takes the game with it.
+	const String publish_dir = "res://.godot/mono/publish/" + Engine::get_singleton()->get_architecture_name();
+	if (DirAccess::exists(publish_dir)) {
+		return true;
+	}
+
+#if defined(APPLE_EMBEDDED_ENABLED)
+	// A NativeAOT payload injected beside the executable rather than packed. Xogot's fast deploy
+	// clones a prebuilt template `.app` and drops the compiled assembly in as a framework, so
+	// there is no publish directory to find — the framework *is* the payload. These are the same
+	// two locations `open_dynamic_library()` searches for it a moment later
+	// (`os_apple_embedded.mm`), so agreeing with it here keeps the gate and the load in step.
+	const String frameworks_dir = OS::get_singleton()->get_executable_path().get_base_dir().path_join("Frameworks");
+	const String assembly_name = Path::get_csharp_project_name();
+	if (!assembly_name.is_empty()) {
+		if (FileAccess::exists(frameworks_dir.path_join(assembly_name + ".framework").path_join(assembly_name)) ||
+				FileAccess::exists(frameworks_dir.path_join(assembly_name + ".dylib"))) {
+			return true;
+		}
+	}
+#endif
+
+	return false;
 #endif
 }
 
@@ -706,6 +740,27 @@ void GDMono::initialize() {
 	print_verbose(".NET: GodotPlugins initialized");
 
 	_on_core_api_assembly_loaded();
+
+	// Deliberately outside TOOLS_ENABLED: a *deployed* game is exactly where this matters. Xogot
+	// attaches its managed debugger by process id, which is a race against CoreCLR loading the
+	// project assembly — breakpoints in early code (`_Ready` of the first scene) would be missed.
+	// When XOGOT_MANAGED_DEBUG_SOCKET is set, block here until the editor says it has attached.
+	// With the variable unset this is a no-op, so an ordinary exported game is unaffected.
+	String startup_barrier_error;
+#ifdef TOOLS_ENABLED
+	// The editor loads the project assembly below, so a failed barrier really does stop it.
+	ERR_FAIL_COND_MSG(!gdmono::wait_for_managed_debugger_startup(startup_barrier_error),
+			".NET: Managed debugger startup barrier failed: " + startup_barrier_error + ". The project assembly was not loaded.");
+#else
+	// In a template build the game assembly was already loaded by `godot_plugins_initialize`
+	// above, so the old "project assembly was not loaded" wording was simply wrong here. A failed
+	// barrier only means no debugger is attached; the game is perfectly able to keep running, and
+	// bailing out of `initialize()` would leave the managed callbacks half-configured.
+	if (!gdmono::wait_for_managed_debugger_startup(startup_barrier_error)) {
+		WARN_PRINT(".NET: Managed debugger startup barrier failed: " + startup_barrier_error +
+				". Continuing without a managed debugger.");
+	}
+#endif
 
 #ifdef TOOLS_ENABLED
 	_try_load_project_assembly();
@@ -844,6 +899,24 @@ void GodotSharp::reload_assemblies(bool p_soft_reload) {
 	if (CSharpLanguage::get_singleton()->is_assembly_reloading_needed()) {
 		CSharpLanguage::get_singleton()->reload_assemblies(p_soft_reload);
 	}
+#endif
+}
+
+void GodotSharp::xogot_reload_assemblies() {
+	// Deliberately skips the `is_assembly_reloading_needed()` gate used above.
+	// An incremental MSBuild that leaves the project assembly timestamp
+	// unchanged makes that gate return false, and the skipped reload never
+	// reaches the XogotAssemblyReloaded callback. Xogot's build coordinator
+	// then waits on the `reloading` state forever and the editor can no longer
+	// build or play. Reloading unconditionally is also what Play needs: the
+	// editor can lack the script registrations for an assembly whose timestamp
+	// did not move (for example when the managed tools started late).
+	//
+	// Only the editor icall reaches this method, and hot reload is always
+	// compiled into editor builds, so the empty body below is unreachable.
+#ifdef GD_MONO_HOT_RELOAD
+	CRASH_COND(CSharpLanguage::get_singleton() == nullptr);
+	CSharpLanguage::get_singleton()->reload_assemblies(false);
 #endif
 }
 

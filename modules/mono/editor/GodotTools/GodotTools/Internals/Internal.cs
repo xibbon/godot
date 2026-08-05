@@ -52,6 +52,19 @@ namespace GodotTools.Internals
 
         public static void ReloadAssemblies(bool softReload) => godot_icall_Internal_ReloadAssemblies(softReload);
 
+        /// Reloads the project assemblies and always reports the outcome through
+        /// <c>GodotSharpEditor.XogotAssemblyReloaded</c>. <see cref="ReloadAssemblies"/>
+        /// skips the reload — and therefore the callback — when the assembly on disk
+        /// is not newer than the loaded one, which strands an Xogot build in its
+        /// `reloading` state.
+        public static void XogotReloadAssemblies() => godot_icall_Internal_XogotReloadAssemblies();
+
+        public static void XogotNotifyBuildState(string state)
+        {
+            using godot_string stateIn = Marshaling.ConvertStringToNative(state);
+            godot_icall_Internal_XogotNotifyBuildState(stateIn);
+        }
+
         public static void EditorDebuggerNodeReloadScripts() => godot_icall_Internal_EditorDebuggerNodeReloadScripts();
 
         public static bool ScriptEditorEdit(Resource resource, int line, int col, bool grabFocus = true) =>
@@ -139,6 +152,10 @@ namespace GodotTools.Internals
         private static partial bool godot_icall_Internal_IsAssembliesReloadingNeeded();
 
         private static partial void godot_icall_Internal_ReloadAssemblies(bool softReload);
+
+        private static partial void godot_icall_Internal_XogotReloadAssemblies();
+
+        private static partial void godot_icall_Internal_XogotNotifyBuildState(in godot_string state);
 
         private static partial void godot_icall_Internal_EditorDebuggerNodeReloadScripts();
 

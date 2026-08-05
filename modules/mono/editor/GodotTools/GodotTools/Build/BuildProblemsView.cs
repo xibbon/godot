@@ -239,7 +239,7 @@ namespace GodotTools.Build
 
             string? projectDir = !string.IsNullOrEmpty(diagnostic.ProjectFile) ?
                 diagnostic.ProjectFile.GetBaseDir() :
-                GodotSharpEditor.Instance.MSBuildPanel.LastBuildInfo?.Solution.GetBaseDir();
+                GodotSharpEditor.Instance.MSBuildPanel?.LastBuildInfo?.Solution.GetBaseDir();
             if (string.IsNullOrEmpty(projectDir))
                 return;
 
