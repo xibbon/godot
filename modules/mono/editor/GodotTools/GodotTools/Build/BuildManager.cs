@@ -722,14 +722,14 @@ namespace GodotTools.Build
             platform, runtimeIdentifier, publishOutputDir, includeDebugSymbols));
 
         public static bool GenerateXCFrameworkBlocking(
-            List<string> outputPaths,
+            List<(string Library, string DebugSymbols)> slices,
             string xcFrameworkPath)
         {
             using var pr = new EditorProgress("generate_xcframework", "Generating XCFramework...", 1);
 
             pr.Step("Running xcodebuild -create-xcframework", 0);
 
-            if (!GenerateXCFramework(outputPaths, xcFrameworkPath))
+            if (!GenerateXCFramework(slices, xcFrameworkPath))
             {
                 ShowBuildErrorDialog("Failed to generate XCFramework");
                 return false;
@@ -738,14 +738,14 @@ namespace GodotTools.Build
             return true;
         }
 
-        private static bool GenerateXCFramework(List<string> outputPaths, string xcFrameworkPath)
+        private static bool GenerateXCFramework(List<(string Library, string DebugSymbols)> slices, string xcFrameworkPath)
         {
             if (!IsXogotEmbedded)
                 Internal.GodotMainIteration();
 
             try
             {
-                int exitCode = BuildSystem.GenerateXCFramework(outputPaths, xcFrameworkPath, StdOutputReceived, StdErrorReceived);
+                int exitCode = BuildSystem.GenerateXCFramework(slices, xcFrameworkPath, StdOutputReceived, StdErrorReceived);
 
                 if (exitCode != 0)
                     PrintVerbose(

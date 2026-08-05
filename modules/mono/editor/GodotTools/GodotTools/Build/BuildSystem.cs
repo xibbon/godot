@@ -412,7 +412,7 @@ namespace GodotTools.Build
                 environmentVariables.Remove(env);
         }
 
-        private static Process DoGenerateXCFramework(List<string> outputPaths, string xcFrameworkPath,
+        private static Process DoGenerateXCFramework(List<(string Library, string DebugSymbols)> slices, string xcFrameworkPath,
             Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
         {
             if (Directory.Exists(xcFrameworkPath))
@@ -422,7 +422,7 @@ namespace GodotTools.Build
 
             var startInfo = new ProcessStartInfo("xcrun");
 
-            BuildXCFrameworkArguments(outputPaths, xcFrameworkPath, startInfo.ArgumentList);
+            BuildXCFrameworkArguments(slices, xcFrameworkPath, startInfo.ArgumentList);
 
             string launchMessage = startInfo.GetCommandLineDisplay(new StringBuilder("Packaging: ")).ToString();
             stdOutHandler?.Invoke(launchMessage);
@@ -457,9 +457,9 @@ namespace GodotTools.Build
             return process;
         }
 
-        public static int GenerateXCFramework(List<string> outputPaths, string xcFrameworkPath, Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
+        public static int GenerateXCFramework(List<(string Library, string DebugSymbols)> slices, string xcFrameworkPath, Action<string?>? stdOutHandler, Action<string?>? stdErrHandler)
         {
-            using (var process = DoGenerateXCFramework(outputPaths, xcFrameworkPath, stdOutHandler, stdErrHandler))
+            using (var process = DoGenerateXCFramework(slices, xcFrameworkPath, stdOutHandler, stdErrHandler))
             {
                 process.WaitForExit();
 
@@ -467,21 +467,18 @@ namespace GodotTools.Build
             }
         }
 
-        private static void BuildXCFrameworkArguments(List<string> outputPaths,
+        private static void BuildXCFrameworkArguments(List<(string Library, string DebugSymbols)> slices,
             string xcFrameworkPath, Collection<string> arguments)
         {
-            var baseDylib = $"{GodotSharpDirs.ProjectAssemblyName}.dylib";
-            var baseSym = $"{GodotSharpDirs.ProjectAssemblyName}.framework.dSYM";
-
             arguments.Add("xcodebuild");
             arguments.Add("-create-xcframework");
 
-            foreach (var outputPath in outputPaths)
+            foreach (var slice in slices)
             {
                 arguments.Add("-library");
-                arguments.Add(Path.Combine(outputPath, baseDylib));
+                arguments.Add(slice.Library);
                 arguments.Add("-debug-symbols");
-                arguments.Add(Path.Combine(outputPath, baseSym));
+                arguments.Add(slice.DebugSymbols);
             }
 
             arguments.Add("-output");
