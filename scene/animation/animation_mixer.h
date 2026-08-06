@@ -366,6 +366,10 @@ protected:
 	GDVIRTUAL5RC(Variant, _post_process_key_value, Ref<Animation>, int, Variant, ObjectID, int);
 
 	void _blend_init();
+	// Runs every process tick regardless of cache_valid, so a mixer whose caches
+	// cannot be built (an unresolvable root_node, for instance) can still notice
+	// that its playback names an animation that no longer exists and recover.
+	virtual void _validate_playback();
 	virtual bool _blend_pre_process(double p_delta, int p_track_count, const AHashMap<NodePath, int> &p_track_map);
 	virtual void _blend_capture(double p_delta);
 	void _blend_calc_total_weight(); // For indeterministic blending.

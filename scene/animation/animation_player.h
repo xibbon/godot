@@ -62,23 +62,26 @@ private:
 	Tween::TransitionType auto_capture_transition_type = Tween::TRANS_LINEAR;
 	Tween::EaseType auto_capture_ease_type = Tween::EASE_IN;
 
+	// Bumped every time playback is (re)started. Comparing the animation name
+	// across a signal emission cannot tell "a handler restarted the same
+	// animation" apart from "nothing happened"; this can.
+	uint64_t playback_generation = 0;
+
 	struct PlaybackData {
-		bool is_enabled = false;
-		String animation_name;
-		double animation_length = 0.0;
+		StringName animation_name;
 		double pos = 0.0;
 		float speed_scale = 1.0;
 		double start_time = 0.0;
 		double end_time = 0.0;
-		double get_start_time() const {
-			if (is_enabled && (Animation::is_less_approx(start_time, 0) || Animation::is_greater_approx(start_time, animation_length))) {
+		double get_start_time(const AnimationData *p_animation_data) const {
+			if (p_animation_data && (Animation::is_less_approx(start_time, 0) || Animation::is_greater_approx(start_time, p_animation_data->animation->get_length()))) {
 				return 0;
 			}
 			return start_time;
 		}
-		double get_end_time() const {
-			if (is_enabled && (Animation::is_less_approx(end_time, 0) || Animation::is_greater_approx(end_time, animation_length))) {
-				return animation_length;
+		double get_end_time(const AnimationData *p_animation_data) const {
+			if (p_animation_data && (Animation::is_less_approx(end_time, 0) || Animation::is_greater_approx(end_time, p_animation_data->animation->get_length()))) {
+				return p_animation_data->animation->get_length();
 			}
 			return end_time;
 		}
@@ -128,12 +131,17 @@ private:
 
 	bool movie_quit_on_finish = false;
 
-	void _play(const StringName &p_name, double p_custom_blend = -1, float p_custom_scale = 1.0, bool p_from_end = false);
+	void _play(const StringName &p_name, double p_custom_blend = -1, float p_custom_scale = 1.0, bool p_from_end = false, bool p_preserve_queue = false);
+	void _play_section(const StringName &p_name, double p_start_time, double p_end_time, double p_custom_blend, float p_custom_scale, bool p_from_end, bool p_preserve_queue);
 	void _capture(const StringName &p_name, bool p_from_end = false, double p_duration = -1.0, Tween::TransitionType p_trans_type = Tween::TRANS_LINEAR, Tween::EaseType p_ease_type = Tween::EASE_IN);
 	void _process_playback_data(PlaybackData &cd, double p_delta, float p_blend, bool p_seeked, bool p_internal_seeked, bool p_started, bool p_is_current = false);
 	void _blend_playback_data(double p_delta, bool p_started);
+	bool _play_queued_animation(bool p_emit_changed, bool *r_started = nullptr);
+	void _clear_invalid_playback();
 	void _stop_internal(bool p_reset, bool p_keep_state);
 	void _check_immediately_after_start();
+	AnimationData *_get_animation_data(const PlaybackData &p_playback_data);
+	const AnimationData *_get_animation_data(const PlaybackData &p_playback_data) const;
 
 	float get_current_blend_amount();
 
@@ -149,12 +157,11 @@ protected:
 	static void _bind_methods();
 
 	// Make animation instances.
+	virtual void _validate_playback() override;
 	virtual bool _blend_pre_process(double p_delta, int p_track_count, const AHashMap<NodePath, int> &p_track_map) override;
 	virtual void _blend_capture(double p_delta) override;
 	virtual void _blend_post_process() override;
 
-	virtual void _animation_changed(const StringName &p_name) override;
-	virtual void _animation_removed(const StringName &p_name, const StringName &p_library) override;
 	virtual void _rename_animation(const StringName &p_from_name, const StringName &p_to_name) override;
 
 #ifndef DISABLE_DEPRECATED

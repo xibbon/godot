@@ -228,9 +228,11 @@ void AnimationMixer::_animation_renamed(const StringName &p_name, const StringNa
 	if (!animation_set.has(from_name)) {
 		return; // No need to update because not the one from the library being used.
 	}
-	_animation_set_cache_update();
-
+	// Rename the playback state first so that, once the cache update erases the
+	// old key and inserts the new one, listeners of animation_list_changed and
+	// caches_cleared already observe a player that names a live animation.
 	_rename_animation(from_name, to_name);
+	_animation_set_cache_update();
 }
 
 void AnimationMixer::_animation_changed(const StringName &p_name) {
@@ -360,33 +362,41 @@ void AnimationMixer::rename_animation_library(const StringName &p_name, const St
 	ERR_FAIL_COND_MSG(String(p_new_name).contains_char('/') || String(p_new_name).contains_char(':') || String(p_new_name).contains_char(',') || String(p_new_name).contains_char('['), "Invalid animation library name: " + String(p_new_name) + ".");
 #endif
 
-	bool found = false;
-	for (AnimationLibraryData &lib : animation_libraries) {
+	// Validate every library name before mutating anything. The old code renamed
+	// the matching library in place and could then ERR_FAIL on a later iteration,
+	// leaving playback bound to a name that never entered animation_set.
+	int library_index = -1;
+	for (uint32_t i = 0; i < animation_libraries.size(); i++) {
+		const AnimationLibraryData &lib = animation_libraries[i];
 		ERR_FAIL_COND_MSG(lib.name == p_new_name, "Can't rename animation library to another existing name: " + String(p_new_name) + ".");
 		if (lib.name == p_name) {
-			found = true;
-			lib.name = p_new_name;
-			// rename connections
-			lib.library->disconnect(SNAME("animation_added"), callable_mp(this, &AnimationMixer::_animation_added));
-			lib.library->disconnect(SNAME("animation_removed"), callable_mp(this, &AnimationMixer::_animation_removed));
-			lib.library->disconnect(SNAME("animation_renamed"), callable_mp(this, &AnimationMixer::_animation_renamed));
-
-			lib.library->connect(SNAME("animation_added"), callable_mp(this, &AnimationMixer::_animation_added).bind(p_new_name));
-			lib.library->connect(SNAME("animation_removed"), callable_mp(this, &AnimationMixer::_animation_removed).bind(p_new_name));
-			lib.library->connect(SNAME("animation_renamed"), callable_mp(this, &AnimationMixer::_animation_renamed).bind(p_new_name));
-
-			for (const KeyValue<StringName, Ref<Animation>> &K : lib.library->animations) {
-				StringName old_name = p_name == StringName() ? K.key : StringName(String(p_name) + "/" + String(K.key));
-				StringName new_name = p_new_name == StringName() ? K.key : StringName(String(p_new_name) + "/" + String(K.key));
-				_rename_animation(old_name, new_name);
-			}
+			library_index = i;
 		}
 	}
+	ERR_FAIL_COND(library_index == -1);
 
-	ERR_FAIL_COND(!found);
+	AnimationLibraryData &lib = animation_libraries[library_index];
+	Vector<StringName> old_animation_names;
+	Vector<StringName> new_animation_names;
+	for (const KeyValue<StringName, Ref<Animation>> &K : lib.library->animations) {
+		old_animation_names.push_back(p_name == StringName() ? K.key : StringName(String(p_name) + "/" + String(K.key)));
+		new_animation_names.push_back(p_new_name == StringName() ? K.key : StringName(String(p_new_name) + "/" + String(K.key)));
+	}
+
+	lib.library->disconnect(SNAME("animation_added"), callable_mp(this, &AnimationMixer::_animation_added));
+	lib.library->disconnect(SNAME("animation_removed"), callable_mp(this, &AnimationMixer::_animation_removed));
+	lib.library->disconnect(SNAME("animation_renamed"), callable_mp(this, &AnimationMixer::_animation_renamed));
+
+	lib.name = p_new_name;
+	lib.library->connect(SNAME("animation_added"), callable_mp(this, &AnimationMixer::_animation_added).bind(p_new_name));
+	lib.library->connect(SNAME("animation_removed"), callable_mp(this, &AnimationMixer::_animation_removed).bind(p_new_name));
+	lib.library->connect(SNAME("animation_renamed"), callable_mp(this, &AnimationMixer::_animation_renamed).bind(p_new_name));
 
 	animation_libraries.sort(); // Must keep alphabetical order.
 
+	for (int i = 0; i < old_animation_names.size(); i++) {
+		_rename_animation(old_animation_names[i], new_animation_names[i]);
+	}
 	_animation_set_cache_update(); // Update cache.
 
 	notify_property_list_changed();
@@ -1012,8 +1022,13 @@ bool AnimationMixer::_update_caches() {
 /* -- Blending processor ---------------------- */
 /* -------------------------------------------- */
 
+void AnimationMixer::_validate_playback() {
+	//
+}
+
 void AnimationMixer::_process_animation(double p_delta, bool p_update_only) {
 	_blend_init();
+	_validate_playback();
 	if (cache_valid && _blend_pre_process(p_delta, track_count, track_map)) {
 		_blend_capture(p_delta);
 		_blend_calc_total_weight();
