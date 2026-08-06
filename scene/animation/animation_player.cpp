@@ -49,7 +49,20 @@ bool AnimationPlayer::_set(const StringName &p_name, const Variant &p_value) {
 			StringName from = array[i * 3 + 0];
 			StringName to = array[i * 3 + 1];
 			float time = array[i * 3 + 2];
-			set_blend_time(from, to, time);
+			// Write directly rather than through set_blend_time(), which requires
+			// both animations to be present. A scene can legitimately load before
+			// an external AnimationLibrary resolves, and erroring here would both
+			// spam the output and drop the entry for good on the next save. Only
+			// the existence check is relaxed; a negative time is still invalid.
+			ERR_CONTINUE_MSG(time < 0, "Blend time cannot be smaller than 0.");
+			BlendKey bk;
+			bk.from = from;
+			bk.to = to;
+			if (Math::is_zero_approx(time)) {
+				blend_times.erase(bk);
+			} else {
+				blend_times[bk] = time;
+			}
 		}
 #ifndef DISABLE_DEPRECATED
 	} else if (p_name == "method_call_mode") {
@@ -84,6 +97,11 @@ bool AnimationPlayer::_get(const StringName &p_name, Variant &r_ret) const {
 
 		Array array;
 		for (int i = 0; i < keys.size(); i++) {
+			// Every entry is serialized, including pairs whose animations are not
+			// currently resolvable. Filtering here would silently and permanently
+			// delete blend times whenever a save happened while a library was
+			// temporarily absent, for example during a reimport or between the
+			// halves of an undo step. Deserialization tolerates unknown names.
 			array.push_back(keys[i].from);
 			array.push_back(keys[i].to);
 			array.push_back(blend_times.get(keys[i]));
@@ -156,18 +174,31 @@ void AnimationPlayer::_notification(int p_what) {
 	}
 }
 
+AnimationMixer::AnimationData *AnimationPlayer::_get_animation_data(const PlaybackData &p_playback_data) {
+	return animation_set.getptr(p_playback_data.animation_name);
+}
+
+const AnimationMixer::AnimationData *AnimationPlayer::_get_animation_data(const PlaybackData &p_playback_data) const {
+	return animation_set.getptr(p_playback_data.animation_name);
+}
+
 void AnimationPlayer::_process_playback_data(PlaybackData &cd, double p_delta, float p_blend, bool p_seeked, bool p_internal_seeked, bool p_started, bool p_is_current) {
+	AnimationData *animation_data = _get_animation_data(cd);
+	if (!animation_data) {
+		return;
+	}
+	const Ref<Animation> &animation = animation_data->animation;
 	double speed = speed_scale * cd.speed_scale;
 	bool backwards = std::signbit(speed); // Negative zero means playing backwards too.
 	double delta = p_started ? 0 : p_delta * speed;
 	double next_pos = cd.pos + delta;
 
-	double start = cd.get_start_time();
-	double end = cd.get_end_time();
+	double start = cd.get_start_time(animation_data);
+	double end = cd.get_end_time(animation_data);
 
 	Animation::LoopedFlag looped_flag = Animation::LOOPED_FLAG_NONE;
 
-	switch (cd.from->animation->get_loop_mode()) {
+	switch (animation->get_loop_mode()) {
 		case Animation::LOOP_NONE: {
 			if (Animation::is_less_approx(next_pos, start)) {
 				next_pos = start;
@@ -207,7 +238,7 @@ void AnimationPlayer::_process_playback_data(PlaybackData &cd, double p_delta, f
 
 	// End detection.
 	if (p_is_current) {
-		if (cd.from->animation->get_loop_mode() == Animation::LOOP_NONE) {
+		if (animation->get_loop_mode() == Animation::LOOP_NONE) {
 			if (!backwards && Animation::is_less_or_equal_approx(prev_pos, end) && Math::is_equal_approx(next_pos, end)) {
 				// Playback finished.
 				next_pos = end; // Snap to the edge.
@@ -248,7 +279,7 @@ void AnimationPlayer::_process_playback_data(PlaybackData &cd, double p_delta, f
 	pi.is_external_seeking = !p_internal_seeked && !p_started;
 	pi.looped_flag = looped_flag;
 	pi.weight = p_blend;
-	make_animation_instance(cd.from->name, pi);
+	make_animation_instance(animation_data->name, pi);
 }
 
 float AnimationPlayer::get_current_blend_amount() {
@@ -299,13 +330,40 @@ void AnimationPlayer::_blend_playback_data(double p_delta, bool p_started) {
 	}
 }
 
-bool AnimationPlayer::_blend_pre_process(double p_delta, int p_track_count, const AHashMap<NodePath, int> &p_track_map) {
-	if (!playback.current.from) {
+void AnimationPlayer::_validate_playback() {
+	AnimationMixer::_validate_playback();
+
+	if (_get_animation_data(playback.current)) {
+		return;
+	}
+	// This runs before the cache_valid gate in _process_animation, so it is also
+	// reached when the caches cannot be built at all. Leaving it inside
+	// _blend_pre_process meant a player with an unresolvable root_node kept
+	// is_playing() true forever and never emitted animation_finished.
+	if (playback.current.animation_name.is_empty()) {
 		_set_process(false);
+		return;
+	}
+	// Do not emit animation_changed here: the previous animation was removed
+	// rather than finished, and every other emission site gates on end_notify.
+	// r_started distinguishes "a queued animation was started" from "it started
+	// and a handler then paused or stopped it" -- the latter still leaves a valid
+	// assigned animation that must not be cleared.
+	bool queued_animation_started = false;
+	if (_play_queued_animation(false, &queued_animation_started) || queued_animation_started) {
+		return;
+	}
+	_clear_invalid_playback();
+}
+
+bool AnimationPlayer::_blend_pre_process(double p_delta, int p_track_count, const AHashMap<NodePath, int> &p_track_map) {
+	AnimationData *current_animation = _get_animation_data(playback.current);
+	if (!current_animation) {
+		// _validate_playback() already handled recovery for this tick.
 		return false;
 	}
 
-	tmp_from = playback.current.from->animation->get_instance_id();
+	tmp_from = current_animation->animation->get_instance_id();
 	end_reached = false;
 	end_notify = false;
 
@@ -316,10 +374,10 @@ bool AnimationPlayer::_blend_pre_process(double p_delta, int p_track_count, cons
 		playback.started = false;
 	}
 
-	AnimationData *prev_from = playback.current.from;
+	StringName previous_animation = playback.current.animation_name;
 	_blend_playback_data(p_delta, started);
 
-	if (prev_from != playback.current.from) {
+	if (previous_animation != playback.current.animation_name) {
 		return false; // Animation has been changed in the process (may be caused by method track), abort process.
 	}
 
@@ -332,39 +390,66 @@ void AnimationPlayer::_blend_capture(double p_delta) {
 
 void AnimationPlayer::_blend_post_process() {
 	if (end_reached) {
+		AnimationData *current_animation = _get_animation_data(playback.current);
+		bool current_was_stopped = playback.current.animation_name.is_empty();
+		bool current_animation_was_removed = !current_was_stopped && !current_animation;
 		// If the method track changes current animation, the animation is not finished.
-		if (tmp_from == playback.current.from->animation->get_instance_id()) {
-			if (!playback_queue.is_empty()) {
+		if (!current_animation || tmp_from == current_animation->animation->get_instance_id()) {
+			while (playback_queue.size() && !animation_set.has(playback_queue.front()->get())) {
+				playback_queue.pop_front();
+			}
+			if (playback_queue.size()) {
+				const uint64_t generation_before_finish = playback_generation;
 				if (!finished_anim.is_empty()) {
 					emit_signal(SceneStringName(animation_finished), finished_anim);
-					// Abort if playback_queue is cleared by animation_finished signal.
-					if (playback_queue.is_empty()) {
-						end_reached = false;
-						end_notify = false;
-						tmp_from = ObjectID();
-						return;
+				}
+				// A handler on animation_finished may have called play(), which
+				// also clears the queue. That is the handler taking over, not an
+				// exhausted queue, so it must not be read as "stop everything" --
+				// doing so cancelled the animation the handler had just started.
+				// The generation counter is compared rather than the animation
+				// name, because a handler is free to replay the SAME animation,
+				// which leaves the name untouched. The no-queue branch below
+				// already tolerates this case.
+				if (playback_generation == generation_before_finish) {
+					bool queued_animation_started = false;
+					if (!_play_queued_animation(end_notify, &queued_animation_started)) {
+						if (!queued_animation_started && playing) {
+							playing = false;
+							_set_process(false);
+							_clear_caches();
+							if (!playing && end_notify) {
+								if (!playback.current.animation_name.is_empty()) {
+									emit_signal(SNAME("current_animation_changed"), "");
+								}
+								if (movie_quit_on_finish && OS::get_singleton()->has_feature("movie")) {
+									print_line(vformat("Movie Maker mode is enabled. Quitting on animation finish as requested by: %s", get_path()));
+									get_tree()->quit();
+								}
+							}
+						} else if (!is_valid() && !playback.current.animation_name.is_empty()) {
+							_clear_invalid_playback();
+						}
 					}
 				}
-				String old = playback.assigned;
-				play(playback_queue.front()->get());
-				String new_name = playback.assigned;
-				playback_queue.pop_front();
-				if (end_notify) {
-					emit_signal(SceneStringName(animation_changed), old, new_name);
-				}
 			} else {
-				_clear_caches();
 				playing = false;
 				_set_process(false);
+				_clear_caches();
+				if (!playing && current_animation_was_removed) {
+					playback.current.animation_name = StringName();
+				}
 				if (end_notify) {
 					if (!finished_anim.is_empty()) {
 						emit_signal(SceneStringName(animation_finished), finished_anim);
 					}
-					emit_signal(SNAME("current_animation_changed"), "");
-					if (movie_quit_on_finish && OS::get_singleton()->has_feature("movie")) {
+					if (!playing && movie_quit_on_finish && OS::get_singleton()->has_feature("movie")) {
 						print_line(vformat("Movie Maker mode is enabled. Quitting on animation finish as requested by: %s", get_path()));
 						get_tree()->quit();
 					}
+				}
+				if (!playing && (end_notify || current_animation_was_removed) && !current_was_stopped) {
+					emit_signal(SNAME("current_animation_changed"), "");
 				}
 			}
 		}
@@ -372,6 +457,45 @@ void AnimationPlayer::_blend_post_process() {
 		end_notify = false;
 	}
 	tmp_from = ObjectID();
+}
+
+bool AnimationPlayer::_play_queued_animation(bool p_emit_changed, bool *r_started) {
+	if (r_started) {
+		*r_started = false;
+	}
+	while (playback_queue.size() && !animation_set.has(playback_queue.front()->get())) {
+		playback_queue.pop_front();
+	}
+	if (playback_queue.is_empty()) {
+		return false;
+	}
+
+	String old_name = playback.assigned;
+	StringName next_name = playback_queue.front()->get();
+	playback_queue.pop_front();
+	if (r_started) {
+		*r_started = true;
+	}
+	if (auto_capture) {
+		_capture(next_name, false, auto_capture_duration, auto_capture_transition_type, auto_capture_ease_type);
+	}
+	_play(next_name, -1.0, 1.0, false, true);
+	if (p_emit_changed) {
+		emit_signal(SceneStringName(animation_changed), old_name, playback.assigned);
+	}
+	return playing && is_valid();
+}
+
+void AnimationPlayer::_clear_invalid_playback() {
+	bool notify = !playback.current.animation_name.is_empty();
+	playback.current.animation_name = StringName();
+	playback.blend.clear();
+	playback.started = false;
+	playing = false;
+	_set_process(false);
+	if (notify) {
+		emit_signal(SNAME("current_animation_changed"), "");
+	}
 }
 
 void AnimationPlayer::queue(const StringName &p_name) {
@@ -415,8 +539,8 @@ void AnimationPlayer::play(const StringName &p_name, double p_custom_blend, floa
 	}
 }
 
-void AnimationPlayer::_play(const StringName &p_name, double p_custom_blend, float p_custom_scale, bool p_from_end) {
-	play_section_with_markers(p_name, StringName(), StringName(), p_custom_blend, p_custom_scale, p_from_end);
+void AnimationPlayer::_play(const StringName &p_name, double p_custom_blend, float p_custom_scale, bool p_from_end, bool p_preserve_queue) {
+	_play_section(p_name, -1.0, -1.0, p_custom_blend, p_custom_scale, p_from_end, p_preserve_queue);
 }
 
 void AnimationPlayer::play_section_with_markers(const StringName &p_name, const StringName &p_start_marker, const StringName &p_end_marker, double p_custom_blend, float p_custom_scale, bool p_from_end) {
@@ -440,16 +564,20 @@ void AnimationPlayer::play_section_with_markers(const StringName &p_name, const 
 	ERR_FAIL_COND_MSG(p_start_marker && p_end_marker && Animation::is_greater_approx(start_time, end_time), vformat("End marker %s is placed earlier than start marker %s in animation: %s.", p_end_marker, p_start_marker, name));
 
 	if (p_start_marker && Animation::is_less_approx(start_time, 0)) {
-		WARN_PRINT_ED(vformat("Negative time start marker: %s is invalid in the section, so the start of the animation: %s is used instead.", p_start_marker, playback.current.from->animation->get_name()));
+		WARN_PRINT_ED(vformat("Negative time start marker: %s is invalid in the section, so the start of the animation: %s is used instead.", p_start_marker, animation->get_name()));
 	}
 	if (p_end_marker && Animation::is_less_approx(end_time, 0)) {
-		WARN_PRINT_ED(vformat("Negative time end marker: %s is invalid in the section, so the end of the animation: %s is used instead.", p_end_marker, playback.current.from->animation->get_name()));
+		WARN_PRINT_ED(vformat("Negative time end marker: %s is invalid in the section, so the end of the animation: %s is used instead.", p_end_marker, animation->get_name()));
 	}
 
-	play_section(name, start_time, end_time, p_custom_blend, p_custom_scale, p_from_end);
+	_play_section(name, start_time, end_time, p_custom_blend, p_custom_scale, p_from_end, false);
 }
 
 void AnimationPlayer::play_section(const StringName &p_name, double p_start_time, double p_end_time, double p_custom_blend, float p_custom_scale, bool p_from_end) {
+	_play_section(p_name, p_start_time, p_end_time, p_custom_blend, p_custom_scale, p_from_end, false);
+}
+
+void AnimationPlayer::_play_section(const StringName &p_name, double p_start_time, double p_end_time, double p_custom_blend, float p_custom_scale, bool p_from_end, bool p_preserve_queue) {
 	StringName name = p_name;
 
 	if (name == StringName()) {
@@ -462,11 +590,11 @@ void AnimationPlayer::play_section(const StringName &p_name, double p_start_time
 
 	Playback &c = playback;
 
-	if (c.current.from) {
+	if (_get_animation_data(c.current)) {
 		double blend_time = 0.0;
 		// Find if it can blend.
 		BlendKey bk;
-		bk.from = c.current.from->name;
+		bk.from = c.current.animation_name;
 		bk.to = name;
 
 		if (Animation::is_greater_or_equal_approx(p_custom_blend, 0)) {
@@ -478,7 +606,7 @@ void AnimationPlayer::play_section(const StringName &p_name, double p_start_time
 			if (blend_times.has(bk)) {
 				blend_time = blend_times[bk];
 			} else {
-				bk.from = c.current.from->name;
+				bk.from = c.current.animation_name;
 				bk.to = "*";
 
 				if (blend_times.has(bk)) {
@@ -505,15 +633,17 @@ void AnimationPlayer::play_section(const StringName &p_name, double p_start_time
 		_clear_playing_caches();
 	}
 
-	c.current.from = &animation_set[name];
+	c.current.animation_name = name;
 	c.current.speed_scale = p_custom_scale;
 	c.current.start_time = p_start_time;
 	c.current.end_time = p_end_time;
+	playback_generation++;
 
-	double start = playback.current.get_start_time();
-	double end = playback.current.get_end_time();
+	AnimationData *animation_data = _get_animation_data(playback.current);
+	double start = playback.current.get_start_time(animation_data);
+	double end = playback.current.get_end_time(animation_data);
 
-	if (!end_reached) {
+	if (!p_preserve_queue) {
 		playback_queue.clear();
 	}
 
@@ -615,7 +745,7 @@ void AnimationPlayer::set_current_animation(const StringName &p_animation) {
 }
 
 StringName AnimationPlayer::get_current_animation() const {
-	return (is_playing() ? playback.assigned : StringName());
+	return (is_playing() ? get_assigned_animation() : StringName());
 }
 
 void AnimationPlayer::set_assigned_animation(const StringName &p_animation) {
@@ -625,7 +755,7 @@ void AnimationPlayer::set_assigned_animation(const StringName &p_animation) {
 	} else {
 		ERR_FAIL_COND_MSG(!animation_set.has(p_animation), vformat("Animation not found: %s.", p_animation.operator String()));
 		playback.current.pos = 0;
-		playback.current.from = &animation_set[p_animation];
+		playback.current.animation_name = p_animation;
 		playback.current.start_time = -1;
 		playback.current.end_time = -1;
 		playback.assigned = p_animation;
@@ -634,7 +764,7 @@ void AnimationPlayer::set_assigned_animation(const StringName &p_animation) {
 }
 
 StringName AnimationPlayer::get_assigned_animation() const {
-	return playback.assigned;
+	return animation_set.has(playback.assigned) ? playback.assigned : StringName();
 }
 
 void AnimationPlayer::pause() {
@@ -670,18 +800,17 @@ void AnimationPlayer::seek_internal(double p_time, bool p_update, bool p_update_
 	_check_immediately_after_start();
 
 	playback.current.pos = p_time;
-	if (!playback.current.from) {
-		if (playback.assigned) {
-			ERR_FAIL_COND_MSG(!animation_set.has(playback.assigned), vformat("Animation not found: %s.", playback.assigned));
-			playback.current.from = &animation_set[playback.assigned];
-		}
-		if (!playback.current.from) {
-			return; // There is no animation.
-		}
+	AnimationData *animation_data = _get_animation_data(playback.current);
+	if (!animation_data && animation_set.has(playback.assigned)) {
+		playback.current.animation_name = playback.assigned;
+		animation_data = _get_animation_data(playback.current);
+	}
+	if (!animation_data) {
+		return; // There is no animation.
 	}
 
-	double start = playback.current.get_start_time();
-	double end = playback.current.get_end_time();
+	double start = playback.current.get_start_time(animation_data);
+	double end = playback.current.get_end_time(animation_data);
 
 	// Clamp the seek position.
 	p_time = CLAMP(p_time, start, end);
@@ -711,41 +840,45 @@ void AnimationPlayer::_check_immediately_after_start() {
 }
 
 bool AnimationPlayer::is_valid() const {
-	return (playback.current.from);
+	return _get_animation_data(playback.current) != nullptr;
 }
 
 double AnimationPlayer::get_current_animation_position() const {
-	ERR_FAIL_NULL_V_MSG(playback.current.from, 0, "AnimationPlayer has no current animation.");
+	ERR_FAIL_NULL_V_MSG(_get_animation_data(playback.current), 0, "AnimationPlayer has no current animation.");
 	return playback.current.pos;
 }
 
 double AnimationPlayer::get_current_animation_length() const {
-	ERR_FAIL_NULL_V_MSG(playback.current.from, 0, "AnimationPlayer has no current animation.");
-	return playback.current.from->animation->get_length();
+	const AnimationData *animation_data = _get_animation_data(playback.current);
+	ERR_FAIL_NULL_V_MSG(animation_data, 0, "AnimationPlayer has no current animation.");
+	return animation_data->animation->get_length();
 }
 
 void AnimationPlayer::set_section_with_markers(const StringName &p_start_marker, const StringName &p_end_marker) {
-	ERR_FAIL_NULL_MSG(playback.current.from, "AnimationPlayer has no current animation.");
+	AnimationData *animation_data = _get_animation_data(playback.current);
+	ERR_FAIL_NULL_MSG(animation_data, "AnimationPlayer has no current animation.");
+	const Ref<Animation> &animation = animation_data->animation;
 	ERR_FAIL_COND_MSG(p_start_marker == p_end_marker && p_start_marker, vformat("Start marker and end marker cannot be the same marker: %s.", p_start_marker));
-	ERR_FAIL_COND_MSG(p_start_marker && !playback.current.from->animation->has_marker(p_start_marker), vformat("Marker %s not found in animation: %s.", p_start_marker, playback.current.from->animation->get_name()));
-	ERR_FAIL_COND_MSG(p_end_marker && !playback.current.from->animation->has_marker(p_end_marker), vformat("Marker %s not found in animation: %s.", p_end_marker, playback.current.from->animation->get_name()));
-	double start_time = p_start_marker ? playback.current.from->animation->get_marker_time(p_start_marker) : -1;
-	double end_time = p_end_marker ? playback.current.from->animation->get_marker_time(p_end_marker) : -1;
+	ERR_FAIL_COND_MSG(p_start_marker && !animation->has_marker(p_start_marker), vformat("Marker %s not found in animation: %s.", p_start_marker, animation->get_name()));
+	ERR_FAIL_COND_MSG(p_end_marker && !animation->has_marker(p_end_marker), vformat("Marker %s not found in animation: %s.", p_end_marker, animation->get_name()));
+	double start_time = p_start_marker ? animation->get_marker_time(p_start_marker) : -1;
+	double end_time = p_end_marker ? animation->get_marker_time(p_end_marker) : -1;
 	if (p_start_marker && Animation::is_less_approx(start_time, 0)) {
-		WARN_PRINT_ONCE_ED(vformat("Marker %s time must be positive in animation: %s.", p_start_marker, playback.current.from->animation->get_name()));
+		WARN_PRINT_ONCE_ED(vformat("Marker %s time must be positive in animation: %s.", p_start_marker, animation->get_name()));
 	}
 	if (p_end_marker && Animation::is_less_approx(end_time, 0)) {
-		WARN_PRINT_ONCE_ED(vformat("Marker %s time must be positive in animation: %s.", p_end_marker, playback.current.from->animation->get_name()));
+		WARN_PRINT_ONCE_ED(vformat("Marker %s time must be positive in animation: %s.", p_end_marker, animation->get_name()));
 	}
 	set_section(start_time, end_time);
 }
 
 void AnimationPlayer::set_section(double p_start_time, double p_end_time) {
-	ERR_FAIL_NULL_MSG(playback.current.from, "AnimationPlayer has no current animation.");
+	AnimationData *animation_data = _get_animation_data(playback.current);
+	ERR_FAIL_NULL_MSG(animation_data, "AnimationPlayer has no current animation.");
 	ERR_FAIL_COND_MSG(Animation::is_greater_or_equal_approx(p_start_time, 0) && Animation::is_greater_or_equal_approx(p_end_time, 0) && Animation::is_greater_or_equal_approx(p_start_time, p_end_time), vformat("Start time %f is greater than end time %f.", p_start_time, p_end_time));
 	playback.current.start_time = p_start_time;
 	playback.current.end_time = p_end_time;
-	playback.current.pos = CLAMP(playback.current.pos, playback.current.get_start_time(), playback.current.get_end_time());
+	playback.current.pos = CLAMP(playback.current.pos, playback.current.get_start_time(animation_data), playback.current.get_end_time(animation_data));
 }
 
 void AnimationPlayer::reset_section() {
@@ -754,13 +887,15 @@ void AnimationPlayer::reset_section() {
 }
 
 double AnimationPlayer::get_section_start_time() const {
-	ERR_FAIL_NULL_V_MSG(playback.current.from, playback.current.start_time, "AnimationPlayer has no current animation.");
-	return playback.current.get_start_time();
+	const AnimationData *animation_data = _get_animation_data(playback.current);
+	ERR_FAIL_NULL_V_MSG(animation_data, playback.current.start_time, "AnimationPlayer has no current animation.");
+	return playback.current.get_start_time(animation_data);
 }
 
 double AnimationPlayer::get_section_end_time() const {
-	ERR_FAIL_NULL_V_MSG(playback.current.from, playback.current.end_time, "AnimationPlayer has no current animation.");
-	return playback.current.get_end_time();
+	const AnimationData *animation_data = _get_animation_data(playback.current);
+	ERR_FAIL_NULL_V_MSG(animation_data, playback.current.end_time, "AnimationPlayer has no current animation.");
+	return playback.current.get_end_time(animation_data);
 }
 
 bool AnimationPlayer::has_section() const {
@@ -790,15 +925,20 @@ bool AnimationPlayer::is_movie_quit_on_finish_enabled() const {
 void AnimationPlayer::_stop_internal(bool p_reset, bool p_keep_state) {
 	_clear_caches();
 	Playback &c = playback;
-	double start = c.current.from ? playback.current.get_start_time() : 0;
 	if (p_reset) {
+		AnimationData *animation_data = _get_animation_data(c.current);
+		if (!animation_data && animation_set.has(c.assigned)) {
+			c.current.animation_name = c.assigned;
+			animation_data = _get_animation_data(c.current);
+		}
+		double start = animation_data ? playback.current.get_start_time(animation_data) : 0;
 		c.blend.clear();
-		if (p_keep_state) {
+		if (p_keep_state || !animation_data) {
 			c.current.pos = start;
 		} else {
 			seek_internal(start, true, true, true);
 		}
-		c.current.from = nullptr;
+		c.current.animation_name = StringName();
 		c.current.speed_scale = 1;
 		emit_signal(SNAME("current_animation_changed"), "");
 	}
@@ -901,34 +1041,66 @@ void AnimationPlayer::get_argument_options(const StringName &p_function, int p_i
 }
 #endif
 
-void AnimationPlayer::_animation_removed(const StringName &p_name, const StringName &p_library) {
-	AnimationMixer::_animation_removed(p_name, p_library);
+void AnimationPlayer::_rename_animation(const StringName &p_from_name, const StringName &p_to_name) {
+	AnimationMixer::_rename_animation(p_from_name, p_to_name);
 
-	StringName name = p_library == StringName() ? p_name : StringName(String(p_library) + "/" + String(p_name));
-
-	if (!animation_set.has(name)) {
-		return; // No need to update because not the one from the library being used.
+	if (playback.current.animation_name == p_from_name) {
+		playback.current.animation_name = p_to_name;
 	}
-
-	_animation_set_cache_update();
-
-	// Erase blends if needed
-	List<BlendKey> to_erase;
-	for (const KeyValue<BlendKey, double> &E : blend_times) {
-		BlendKey bk = E.key;
-		if (bk.from == name || bk.to == name) {
-			to_erase.push_back(bk);
+	if (playback.assigned == p_from_name) {
+		playback.assigned = p_to_name;
+	}
+	for (Blend &blend : playback.blend) {
+		if (blend.data.animation_name == p_from_name) {
+			blend.data.animation_name = p_to_name;
+		}
+	}
+	// The queue-consuming paths silently pop entries not found in animation_set,
+	// so a stale queued name is dropped rather than misnamed.
+	for (StringName &queued_name : playback_queue) {
+		if (queued_name == p_from_name) {
+			queued_name = p_to_name;
 		}
 	}
 
-	while (to_erase.size()) {
-		blend_times.erase(to_erase.front()->get());
-		to_erase.pop_front();
+	// Remap animation_next_set with the same collect-then-apply idiom used for
+	// blend_times below. Rebuilding the whole map keyed by the renamed name would
+	// collapse two entries into one when p_to_name is already a key, with the
+	// winner decided by hash iteration order. The renamed animation wins, and any
+	// entry the rename displaces is dropped, because its key no longer exists.
+	// The renamed animation's own entry is collected separately from the entries
+	// that merely *point at* it. Both can land on the key p_to_name -- an entry
+	// already keyed p_to_name whose value is p_from_name produces that key too --
+	// so folding them into one map would make the winner depend on hash order.
+	// Applying the renamed entry last gives it precedence deterministically.
+	List<StringName> next_set_to_erase;
+	HashMap<StringName, StringName> next_set_to_insert;
+	bool has_renamed_entry = false;
+	StringName renamed_entry_value;
+	for (const KeyValue<StringName, StringName> &E : animation_next_set) {
+		const bool key_renamed = E.key == p_from_name;
+		const bool value_renamed = E.value == p_from_name;
+		if (!key_renamed && !value_renamed) {
+			continue;
+		}
+		next_set_to_erase.push_back(E.key);
+		if (key_renamed) {
+			// animation_next_set is keyed by name, so at most one entry matches.
+			has_renamed_entry = true;
+			renamed_entry_value = value_renamed ? p_to_name : E.value;
+		} else {
+			next_set_to_insert[E.key] = p_to_name;
+		}
 	}
-}
-
-void AnimationPlayer::_rename_animation(const StringName &p_from_name, const StringName &p_to_name) {
-	AnimationMixer::_rename_animation(p_from_name, p_to_name);
+	for (const StringName &key : next_set_to_erase) {
+		animation_next_set.erase(key);
+	}
+	for (const KeyValue<StringName, StringName> &E : next_set_to_insert) {
+		animation_next_set[E.key] = E.value;
+	}
+	if (has_renamed_entry) {
+		animation_next_set[p_to_name] = renamed_entry_value;
+	}
 
 	// Rename autoplay or blends if needed.
 	List<BlendKey> to_erase;
