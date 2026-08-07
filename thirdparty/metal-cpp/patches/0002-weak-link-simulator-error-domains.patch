@@ -1,0 +1,26 @@
+diff --git a/thirdparty/metal-cpp/Metal/MTLIOCommandQueue.hpp b/thirdparty/metal-cpp/Metal/MTLIOCommandQueue.hpp
+index ac956c8f11..78de5d8223 100644
+--- a/thirdparty/metal-cpp/Metal/MTLIOCommandQueue.hpp
++++ b/thirdparty/metal-cpp/Metal/MTLIOCommandQueue.hpp
+@@ -104,7 +104,7 @@ public:
+ };
+ 
+ }
+-_MTL_PRIVATE_DEF_CONST(NS::ErrorDomain, IOErrorDomain);
++_MTL_PRIVATE_DEF_WEAK_CONST(NS::ErrorDomain, IOErrorDomain);
+ _MTL_INLINE MTL::IOCommandBuffer* MTL::IOCommandQueue::commandBuffer()
+ {
+     return Object::sendMessage<MTL::IOCommandBuffer*>(this, _MTL_PRIVATE_SEL(commandBuffer));
+diff --git a/thirdparty/metal-cpp/Metal/MTLTensor.hpp b/thirdparty/metal-cpp/Metal/MTLTensor.hpp
+index 221b8c9f15..5f8b04eb77 100644
+--- a/thirdparty/metal-cpp/Metal/MTLTensor.hpp
++++ b/thirdparty/metal-cpp/Metal/MTLTensor.hpp
+@@ -134,7 +134,7 @@ public:
+ 
+ }
+ 
+-_MTL_PRIVATE_DEF_CONST(NS::ErrorDomain, TensorDomain);
++_MTL_PRIVATE_DEF_WEAK_CONST(NS::ErrorDomain, TensorDomain);
+ 
+ _MTL_INLINE MTL::TensorExtents* MTL::TensorExtents::alloc()
+ {
