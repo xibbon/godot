@@ -55,7 +55,11 @@ extern void godot_js_websocket_destroy(int p_id);
 
 class EMWSPeer : public WebSocketPeer {
 private:
+	using PacketReceivedCallback = void (*)(void *);
+
 	int peer_sock = -1;
+	PacketReceivedCallback packet_received_callback = nullptr;
+	void *packet_received_userdata = nullptr;
 
 	State ready_state = STATE_CLOSED;
 	Vector<uint8_t> packet_buffer;
@@ -77,6 +81,10 @@ private:
 
 public:
 	static void initialize() { WebSocketPeer::_create = EMWSPeer::_create; }
+	void set_packet_received_callback(PacketReceivedCallback p_callback, void *p_userdata) {
+		packet_received_callback = p_callback;
+		packet_received_userdata = p_userdata;
+	}
 
 	// PacketPeer
 	virtual int get_available_packet_count() const override;

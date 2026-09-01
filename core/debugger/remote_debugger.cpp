@@ -41,8 +41,13 @@
 #include "core/math/expression.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
+#include "core/os/main_loop.h"
 #include "core/os/os.h"
 #include "servers/display/display_server.h"
+
+#ifdef WEB_DEBUGGER_ASYNCIFY_ENABLED
+#include <emscripten.h>
+#endif
 
 class RemoteDebugger::PerformanceProfiler : public EngineProfiler {
 	Object *performance = nullptr;
@@ -100,6 +105,14 @@ public:
 		performance = p_performance;
 	}
 };
+
+static void _request_runtime_quit(const Ref<RemoteDebuggerPeer> &p_peer) {
+	MainLoop *main_loop = OS::get_singleton()->get_main_loop();
+	if (main_loop && main_loop->has_method(SNAME("quit"))) {
+		main_loop->call(SNAME("quit"));
+	}
+	p_peer->close();
+}
 
 Error RemoteDebugger::_put_msg(const String &p_message, const Array &p_data) {
 	Array msg = { p_message, Thread::get_caller_id(), p_data };
@@ -362,7 +375,6 @@ void RemoteDebugger::_poll_messages() {
 		ERR_CONTINUE(cmd[2].get_type() != Variant::ARRAY);
 
 		Thread::ID thread = cmd[1];
-
 		if (!messages.has(thread)) {
 			continue; // This thread is not around to receive the messages
 		}
@@ -396,7 +408,6 @@ Array RemoteDebugger::_get_message() {
 void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 	//this function is called when there is a debugger break (bug on script)
 	//or when execution is paused from editor
-
 	{
 		MutexLock lock(mutex);
 		// Tests that require mutex.
@@ -410,7 +421,11 @@ void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 
 		ERR_FAIL_COND_MSG(!is_peer_connected(), "Script Debugger failed to connect, but being used anyway.");
 
-		if (!peer->can_block()) {
+		bool can_wait_for_debugger = peer->can_block();
+#ifdef WEB_DEBUGGER_ASYNCIFY_ENABLED
+		can_wait_for_debugger = true;
+#endif
+		if (!can_wait_for_debugger) {
 			return; // Peer does not support blocking IO. We could at least send the error though.
 		}
 
@@ -616,6 +631,8 @@ void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 				stvar.type = 3;
 
 				send_message("evaluation_return", stvar.serialize());
+			} else if (command == "request_quit") {
+				_request_runtime_quit(peer);
 			} else if (command == "close_debug_session") {
 				peer->close();
 			} else {
@@ -626,7 +643,13 @@ void RemoteDebugger::debug(bool p_can_continue, bool p_is_error_breakpoint) {
 				}
 			}
 		} else {
+#ifdef WEB_DEBUGGER_ASYNCIFY_ENABLED
+			// Yield to the browser so it can deliver WebSocket commands while
+			// Asyncify preserves the paused GDScript call stack.
+			emscripten_sleep(10);
+#else
 			OS::get_singleton()->delay_usec(10000);
+#endif
 			if (Thread::is_main_thread()) {
 				// If this is a busy loop on the main thread, events still need to be processed.
 				DisplayServer::get_singleton()->force_process_and_drop_events();
@@ -744,6 +767,10 @@ Error RemoteDebugger::_core_capture(const String &p_cmd, const Array &p_data, bo
 		script_debugger->set_ignore_error_breaks(p_data[0]);
 	} else if (p_cmd == "break") {
 		script_debugger->debug(script_debugger->get_break_language());
+	} else if (p_cmd == "request_quit") {
+		_request_runtime_quit(peer);
+	} else if (p_cmd == "close_debug_session") {
+		peer->close();
 	} else {
 		r_captured = false;
 	}
