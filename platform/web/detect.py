@@ -155,6 +155,14 @@ def configure(env: "SConsEnvironment"):
         # Retain function names for backtraces at the cost of file size.
         env.Append(LINKFLAGS=["--profiling-funcs"])
 
+    # A Web debugger cannot spin in C++ while it waits for Continue because
+    # that blocks the browser event loop that delivers WebSocket messages.
+    # Asyncify lets the debug template yield from RemoteDebugger::debug()
+    # without losing the GDScript call stack.
+    if env.debug_features:
+        env.Append(CPPDEFINES=["WEB_DEBUGGER_ASYNCIFY_ENABLED"])
+        env.Append(LINKFLAGS=["-sASYNCIFY=1", "-sASYNCIFY_STACK_SIZE=65536"])
+
     if env.editor_build and env["initial_memory"] < 64:
         print_info("Forcing `initial_memory=64` as it is required for the web editor.")
         env["initial_memory"] = 64
@@ -322,9 +330,11 @@ def configure(env: "SConsEnvironment"):
     # Wrap the JavaScript support code around a closure named Godot.
     env.Append(LINKFLAGS=["-sMODULARIZE=1", "-sEXPORT_NAME='Godot'"])
 
-    # Force long jump mode to 'wasm'
-    env.Append(CCFLAGS=["-sSUPPORT_LONGJMP='wasm'"])
-    env.Append(LINKFLAGS=["-sSUPPORT_LONGJMP='wasm'"])
+    # Asyncify does not support Wasm EH long jumps. Debug templates use the
+    # JavaScript implementation so the debugger can yield to the browser.
+    longjmp_mode = "emscripten" if env.debug_features else "wasm"
+    env.Append(CCFLAGS=[f"-sSUPPORT_LONGJMP='{longjmp_mode}'"])
+    env.Append(LINKFLAGS=[f"-sSUPPORT_LONGJMP='{longjmp_mode}'"])
 
     # Allow increasing memory buffer size during runtime. This is efficient
     # when using WebAssembly (in comparison to asm.js) and works well for

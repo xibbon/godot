@@ -43,6 +43,11 @@ class RemoteDebuggerPeerWebSocket : public RemoteDebuggerPeer {
 
 	int max_queued_messages;
 
+#ifdef WEB_ENABLED
+	int web_poll_interval = 0;
+	static void _web_packet_received(void *p_userdata);
+#endif
+
 public:
 	static Ref<RemoteDebuggerPeer> create(const String &p_uri);
 
