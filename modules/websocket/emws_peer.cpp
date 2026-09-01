@@ -50,6 +50,9 @@ void EMWSPeer::_esws_on_message(void *p_obj, const uint8_t *p_data, int p_data_s
 	EMWSPeer *peer = static_cast<EMWSPeer *>(p_obj);
 	uint8_t is_string = p_is_string ? 1 : 0;
 	peer->in_buffer.write_packet(p_data, p_data_size, &is_string);
+	if (peer->packet_received_callback) {
+		peer->packet_received_callback(peer->packet_received_userdata);
+	}
 }
 
 void EMWSPeer::_esws_on_error(void *p_obj) {

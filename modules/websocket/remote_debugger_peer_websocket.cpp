@@ -32,9 +32,37 @@
 
 #include "core/config/project_settings.h"
 
+#ifdef WEB_ENABLED
+#include "core/debugger/engine_debugger.h"
+#include "emws_peer.h"
+
+#include <emscripten.h>
+#include <emscripten/eventloop.h>
+
+static void _poll_web_debugger(void *) {
+	if (EngineDebugger::is_active()) {
+		EngineDebugger::get_singleton()->poll_events(false);
+	}
+}
+
+void RemoteDebuggerPeerWebSocket::_web_packet_received(void *) {
+	// Do not enter the debugger from the browser's WebSocket callback. A Pause
+	// command can start an Asyncify wait loop, which must outlive this callback.
+	emscripten_async_call(&_poll_web_debugger, nullptr, 0);
+}
+#endif
+
 Error RemoteDebuggerPeerWebSocket::connect_to_host(const String &p_uri) {
 	ws_peer = Ref<WebSocketPeer>(WebSocketPeer::create());
 	ERR_FAIL_COND_V(ws_peer.is_null(), ERR_BUG);
+
+#ifdef WEB_ENABLED
+	static_cast<EMWSPeer *>(ws_peer.ptr())->set_packet_received_callback(&_web_packet_received, this);
+	// Browsers can stop requestAnimationFrame when the game tab is in the
+	// background. Keep debugger commands moving so Pause, Stop, and live
+	// breakpoint changes do not depend on a game frame.
+	web_poll_interval = emscripten_set_interval(&_poll_web_debugger, 50.0, nullptr);
+#endif
 
 	Vector<String> protocols;
 	protocols.push_back("binary"); // Compatibility for emscripten TCP-to-WebSocket.
@@ -106,6 +134,12 @@ Error RemoteDebuggerPeerWebSocket::put_message(const Array &p_arr) {
 }
 
 void RemoteDebuggerPeerWebSocket::close() {
+#ifdef WEB_ENABLED
+	if (web_poll_interval != 0) {
+		emscripten_clear_interval(web_poll_interval);
+		web_poll_interval = 0;
+	}
+#endif
 	if (ws_peer.is_valid()) {
 		ws_peer.unref();
 	}
