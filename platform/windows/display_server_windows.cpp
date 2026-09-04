@@ -7468,6 +7468,7 @@ void DisplayServerWindows::_destroy_window(DisplayServerEnums::WindowID p_window
 
 	if (has_winrt_queue) {
 		WinRTUtils::destroy_wd(wd.wrt_wd);
+		wd.wrt_wd = nullptr;
 	}
 	DestroyWindow(wd.hWnd);
 	windows.erase(p_window_id);
@@ -7806,11 +7807,6 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Dis
 	}
 	native_menu = memnew(NativeMenuWindows);
 
-	has_winrt_queue = WinRTUtils::create_queue();
-
-	// Enforce default keep screen on value.
-	screen_set_keep_on(GLOBAL_GET("display/window/energy_saving/keep_screen_on"));
-
 	// Load Windows version info.
 	ZeroMemory(&os_ver, sizeof(OSVERSIONINFOW));
 	os_ver.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
@@ -7833,6 +7829,13 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Dis
 		}
 		FreeLibrary(nt_lib);
 	}
+
+	if (os_ver.dwBuildNumber >= 16299) { // Windows 10 Redstone 3 (1709)+ only.
+		has_winrt_queue = WinRTUtils::create_queue();
+	}
+
+	// Enforce default keep screen on value.
+	screen_set_keep_on(GLOBAL_GET("display/window/energy_saving/keep_screen_on"));
 
 	// Load UXTheme.
 	if (os_ver.dwBuildNumber >= 10240) { // Not available on Wine, use only if real Windows 10/11 detected.
