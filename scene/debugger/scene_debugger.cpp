@@ -526,7 +526,40 @@ Error SceneDebugger::_msg_transform_camera_3d(const Array &p_args) {
 
 // region Embedded process screenshot.
 
+namespace {
+// The debugger peer drops any message above 8 MiB, so chunks stay well under that.
+constexpr int64_t SCREENSHOT_CHUNK_BYTES = 4 << 20;
+constexpr int64_t SCREENSHOT_MAX_TOTAL_BYTES = 64 << 20;
+constexpr int64_t SCREENSHOT_MAX_DIMENSION = 16384;
+
+Vector2i _screenshot_scaled_size(int64_t p_width, int64_t p_height, int64_t p_max_resolution) {
+	const int64_t longest = MAX(p_width, p_height);
+	if (p_max_resolution <= 0 || longest <= p_max_resolution) {
+		return Vector2i(p_width, p_height);
+	}
+	const double scale = double(p_max_resolution) / double(longest);
+	return Vector2i(MAX(1, int(p_width * scale)), MAX(1, int(p_height * scale)));
+}
+
+void _send_screenshot_error(const Variant &p_request_id, const String &p_code, const String &p_message) {
+	Array arr;
+	arr.append(p_request_id);
+	arr.append(p_code);
+	arr.append(p_message);
+	EngineDebugger::get_singleton()->send_message("game_view:screenshot_error", arr);
+}
+} // namespace
+
 Error SceneDebugger::_msg_rq_screenshot(const Array &p_args) {
+	ERR_FAIL_COND_V(p_args.is_empty(), ERR_INVALID_DATA);
+	// Only an explicit protocol version >= 2 selects the byte transport; an upstream editor sends [request_id].
+	if (p_args.size() >= 2 && p_args[1].get_type() == Variant::INT && int64_t(p_args[1]) >= 2) {
+		return _rq_screenshot_v2(p_args);
+	}
+	return _rq_screenshot_v1(p_args);
+}
+
+Error SceneDebugger::_rq_screenshot_v1(const Array &p_args) {
 	ERR_FAIL_COND_V(p_args.is_empty(), ERR_INVALID_DATA);
 
 	Viewport *viewport = SceneTree::get_singleton()->get_root();
@@ -566,6 +599,109 @@ Error SceneDebugger::_msg_rq_screenshot(const Array &p_args) {
 	arr.append(path);
 	EngineDebugger::get_singleton()->send_message("game_view:get_screenshot", arr);
 
+	return OK;
+}
+
+Error SceneDebugger::_rq_screenshot_v2(const Array &p_args) {
+	const Variant request_id = p_args[0];
+	const int64_t version = p_args[1];
+	if (version != 2) {
+		_send_screenshot_error(request_id, "unsupported_version", vformat("Screenshot protocol version %d is not supported.", version));
+		return OK;
+	}
+	int64_t max_resolution = 0;
+	if (p_args.size() >= 3) {
+		if (p_args[2].get_type() != Variant::INT || int64_t(p_args[2]) < 0) {
+			_send_screenshot_error(request_id, "invalid_request", "max_resolution must be an integer >= 0.");
+			return OK;
+		}
+		max_resolution = p_args[2];
+		if (max_resolution >= SCREENSHOT_MAX_DIMENSION) {
+			max_resolution = 0; // Can never bind.
+		}
+	}
+	bool include_image = true;
+	if (p_args.size() >= 4) {
+		if (p_args[3].get_type() != Variant::BOOL) {
+			_send_screenshot_error(request_id, "invalid_request", "include_image must be a boolean.");
+			return OK;
+		}
+		include_image = p_args[3];
+	}
+
+	Viewport *viewport = SceneTree::get_singleton()->get_root();
+	if (!viewport) {
+		_send_screenshot_error(request_id, "capture_failed", "Cannot get a viewport from the main screen.");
+		return OK;
+	}
+	Ref<ViewportTexture> texture = viewport->get_texture();
+	if (texture.is_null()) {
+		_send_screenshot_error(request_id, "capture_failed", "Cannot get a viewport texture from the main screen.");
+		return OK;
+	}
+	Ref<Image> img = texture->get_image();
+	if (img.is_null() || img->is_empty()) {
+		_send_screenshot_error(request_id, "capture_failed", "Cannot get an image from a viewport texture of the main screen.");
+		return OK;
+	}
+	img->clear_mipmaps();
+
+	const int64_t original_width = img->get_width();
+	const int64_t original_height = img->get_height();
+	if (original_width > SCREENSHOT_MAX_DIMENSION || original_height > SCREENSHOT_MAX_DIMENSION) {
+		_send_screenshot_error(request_id, "image_too_large", vformat("The viewport is %dx%d, above the %d pixel limit.", original_width, original_height, SCREENSHOT_MAX_DIMENSION));
+		return OK;
+	}
+	const Vector2i encoded = _screenshot_scaled_size(original_width, original_height, max_resolution);
+
+	Vector<uint8_t> png;
+	if (include_image) {
+		img->convert(Image::FORMAT_RGBA8);
+#ifdef RD_ENABLED
+		RenderingDevice *rendering_device = RD::get_singleton();
+		if (rendering_device && RenderingServer::get_singleton()->viewport_is_using_hdr_2d(viewport->get_viewport_rid())) {
+			img->linear_to_srgb();
+		}
+#endif
+		if (encoded.x != original_width || encoded.y != original_height) {
+			img->resize(encoded.x, encoded.y, Image::INTERPOLATE_LANCZOS);
+		}
+		png = img->save_png_to_buffer();
+		img.unref();
+		if (png.is_empty()) {
+			_send_screenshot_error(request_id, "encode_failed", "PNG encoding of the viewport image failed.");
+			return OK;
+		}
+		if (png.size() > SCREENSHOT_MAX_TOTAL_BYTES) {
+			_send_screenshot_error(request_id, "image_too_large", vformat("The encoded PNG is %d bytes, above the %d byte limit.", png.size(), SCREENSHOT_MAX_TOTAL_BYTES));
+			return OK;
+		}
+	}
+
+	const int64_t total_bytes = png.size();
+	const int64_t chunk_count = total_bytes == 0 ? 0 : (total_bytes + SCREENSHOT_CHUNK_BYTES - 1) / SCREENSHOT_CHUNK_BYTES;
+
+	Array begin;
+	begin.append(request_id);
+	begin.append(original_width);
+	begin.append(original_height);
+	begin.append(int64_t(encoded.x));
+	begin.append(int64_t(encoded.y));
+	begin.append(total_bytes);
+	begin.append(chunk_count);
+	EngineDebugger::get_singleton()->send_message("game_view:screenshot_begin", begin);
+
+	for (int64_t i = 0; i < chunk_count; i++) {
+		Array chunk;
+		chunk.append(request_id);
+		chunk.append(i);
+		if (chunk_count == 1) {
+			chunk.append(png); // slice() copies; the whole buffer is already one chunk.
+		} else {
+			chunk.append(png.slice(i * SCREENSHOT_CHUNK_BYTES, MIN((i + 1) * SCREENSHOT_CHUNK_BYTES, total_bytes)));
+		}
+		EngineDebugger::get_singleton()->send_message("game_view:screenshot_chunk", chunk);
+	}
 	return OK;
 }
 
