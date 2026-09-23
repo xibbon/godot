@@ -297,8 +297,6 @@ def generate_bundle_apple_embedded(platform, framework_dir, framework_dir_sim, u
                 mvk_path + "/ios-arm64_x86_64-simulator", app_dir + "/MoltenVK.xcframework/ios-arm64_x86_64-simulator"
             )
             shutil.copy(mvk_path + "/Info.plist", app_dir + "/MoltenVK.xcframework/Info.plist")
-        elif env["vulkan"]:
-            raise RuntimeError("MoltenVK is required for a Vulkan-enabled iOS export template")
 
     # ZIP Xcode project bundle.
     zip_dir = env.Dir("#bin/" + (app_prefix + extra_suffix).replace(".", "_")).abspath
