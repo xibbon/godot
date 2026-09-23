@@ -1812,7 +1812,6 @@ Error EditorExportPlatformAppleEmbedded::_export_project_helper(const Ref<Editor
 		add_message(EXPORT_MESSAGE_ERROR, TTR("Prepare Templates"), TTR("Could not open export template (not a zip file?): \"%s\".", src_pkg_name));
 		return ERR_CANT_OPEN;
 	}
-	config_data.has_moltenvk = unzLocateFile(src_pkg_zip, "MoltenVK.xcframework/Info.plist", 0) == UNZ_OK;
 
 	err = _export_apple_embedded_plugins(p_preset, config_data, binary_dir, assets, p_debug);
 	if (err != OK) {
@@ -2096,7 +2095,7 @@ Error EditorExportPlatformAppleEmbedded::_export_project_helper(const Ref<Editor
 		}
 	});
 	if (result != 0) {
-		add_message(EXPORT_MESSAGE_ERROR, TTR("Xcode Build"), vformat(TTR("xcodebuild archive failed with exit code %d. See the editor log for details."), result));
+		add_message(EXPORT_MESSAGE_ERROR, TTR("Xcode Build"), vformat(TTR("Failed to run xcodebuild with code %d"), err));
 		return ERR_CANT_CREATE;
 	}
 
@@ -2130,8 +2129,8 @@ Error EditorExportPlatformAppleEmbedded::_export_project_helper(const Ref<Editor
 			}
 		});
 		if (result != 0) {
-			add_message(EXPORT_MESSAGE_ERROR, TTR("Xcode Build"), vformat(TTR("xcodebuild export failed with exit code %d. See the editor log for details."), result));
-			return ERR_CANT_CREATE;
+			add_message(EXPORT_MESSAGE_ERROR, TTR("Xcode Build"), vformat(TTR("Failed to run xcodebuild with code %d"), err));
+			return err;
 		}
 
 		if (!export_succeeded) {
