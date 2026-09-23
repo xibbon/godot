@@ -150,6 +150,7 @@ protected:
 		String modules_buildphase;
 		String modules_buildgrp;
 		Vector<String> capabilities;
+		bool has_moltenvk = false;
 	};
 
 	struct CodeSigningDetails {
