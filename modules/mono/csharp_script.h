@@ -469,6 +469,7 @@ class CSharpLanguage : public ScriptLanguage {
 	bool finalized = false;
 
 	GDMono *gdmono = nullptr;
+	bool gdmono_initialization_requested = false;
 	SelfList<CSharpScript>::List script_list;
 
 	Mutex script_instances_mutex;
@@ -533,6 +534,18 @@ public:
 	_FORCE_INLINE_ EditorPlugin *get_godotsharp_editor() const {
 		return godotsharp_editor;
 	}
+
+	// In Xogot the Swift editor reaches the native bridge while EditorNode is
+	// still completing its startup callbacks. Keep the regular callback for
+	// standalone Godot, but make tools initialization safely retryable from the
+	// bridge once the embedded editor is ready.
+	bool is_gdmono_runtime_initialized() const {
+		return gdmono != nullptr && gdmono->is_runtime_initialized();
+	}
+	bool is_gdmono_initialization_requested() const {
+		return gdmono_initialization_requested;
+	}
+	static bool initialize_godotsharp_editor();
 #endif
 
 	static void release_script_gchandle(MonoGCHandleData &p_gchandle);

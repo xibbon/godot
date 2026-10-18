@@ -162,15 +162,35 @@ private:
 #endif
 
 #ifdef TOOLS_ENABLED
-		String data_dir_root = exe_dir.path_join("GodotSharp");
+		String data_dir_root;
+		if (OS::get_singleton()->has_environment("XOGOT_GODOTSHARP_PATH")) {
+			data_dir_root = OS::get_singleton()->get_environment("XOGOT_GODOTSHARP_PATH").simplify_path();
+		} else if (OS::get_singleton()->has_environment("XOGOT_DOTNET_COMPONENT_PATH")) {
+			// The development override is inherited by the process before Swift
+			// has a chance to derive XOGOT_GODOTSHARP_PATH. Resolve it here as
+			// well so the native module does not depend on frontend startup order.
+			data_dir_root = OS::get_singleton()->get_environment("XOGOT_DOTNET_COMPONENT_PATH")
+									.simplify_path()
+									.path_join("GodotSharp");
+		}
+		if (data_dir_root.is_empty()) {
+			data_dir_root = exe_dir.path_join("GodotSharp");
+		}
 		data_editor_tools_dir = data_dir_root.path_join("Tools");
 		String api_assemblies_base_dir = data_dir_root.path_join("Api");
 		build_logs_dir = mono_user_dir.path_join("build_logs");
 #ifdef MACOS_ENABLED
-		if (!DirAccess::exists(data_editor_tools_dir)) {
+		// Xogot can provide GodotSharp as a downloaded component. An explicit
+		// component path must never silently fall back to an app-bundled payload:
+		// uninstalling the component should disable managed support immediately.
+		const bool has_xogot_component_path = OS::get_singleton()->has_environment("XOGOT_GODOTSHARP_PATH") ||
+				OS::get_singleton()->has_environment("XOGOT_DOTNET_COMPONENT_PATH");
+		const bool xogot_optional_component_mode = OS::get_singleton()->get_environment("XOGOT_OPTIONAL_DOTNET_COMPONENT") == "1";
+		const bool allow_packaged_fallback = !has_xogot_component_path && !xogot_optional_component_mode;
+		if (allow_packaged_fallback && !DirAccess::exists(data_editor_tools_dir)) {
 			data_editor_tools_dir = res_dir.path_join("GodotSharp").path_join("Tools");
 		}
-		if (!DirAccess::exists(api_assemblies_base_dir)) {
+		if (allow_packaged_fallback && !DirAccess::exists(api_assemblies_base_dir)) {
 			api_assemblies_base_dir = res_dir.path_join("GodotSharp").path_join("Api");
 		}
 #endif

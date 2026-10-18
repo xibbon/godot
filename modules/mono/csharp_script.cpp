@@ -121,14 +121,14 @@ void CSharpLanguage::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "dotnet/project/assembly_reload_attempts", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), 3);
 #endif
 
-#ifdef TOOLS_ENABLED
-	EditorNode::add_init_callback(&_editor_init_callback);
-#endif
-
 	gdmono = memnew(GDMono);
 
 	// Initialize only if the project uses C#.
-	if (gdmono->should_initialize()) {
+	gdmono_initialization_requested = gdmono->should_initialize();
+	if (gdmono_initialization_requested) {
+#ifdef TOOLS_ENABLED
+		EditorNode::add_init_callback(&_editor_init_callback);
+#endif
 		gdmono->initialize();
 	}
 }
@@ -443,6 +443,13 @@ bool CSharpLanguage::handles_global_class_type(const String &p_type) const {
 }
 
 String CSharpLanguage::get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool) const {
+	// The editor scans C# files before an optional managed component can finish
+	// startup. Without its callback table, there is no class data to report.
+	if (!gdmono || !gdmono->is_runtime_initialized() || !GDMonoCache::godot_api_cache_updated ||
+			!GDMonoCache::managed_callbacks.ScriptManagerBridge_GetGlobalClassName) {
+		return String();
+	}
+
 	String class_name;
 	GDMonoCache::managed_callbacks.ScriptManagerBridge_GetGlobalClassName(&p_path, r_base_type, r_icon_path, r_is_abstract, r_is_tool, &class_name);
 	return class_name;
@@ -625,6 +632,9 @@ bool CSharpLanguage::is_assembly_reloading_needed() {
 void CSharpLanguage::reload_assemblies() {
 	ERR_FAIL_NULL(gdmono);
 	if (!gdmono->is_runtime_initialized()) {
+		if (get_godotsharp_editor() != nullptr) {
+			get_godotsharp_editor()->call("XogotAssemblyReloaded", false);
+		}
 		return;
 	}
 
@@ -833,6 +843,9 @@ void CSharpLanguage::reload_assemblies() {
 			scr->pending_reload_state.clear();
 		}
 
+		if (get_godotsharp_editor() != nullptr) {
+			get_godotsharp_editor()->call("XogotAssemblyReloaded", false);
+		}
 		return;
 	}
 
@@ -1025,16 +1038,27 @@ void CSharpLanguage::reload_assemblies() {
 		SignalsDock::get_singleton()->update_lists();
 	}
 #endif
+
+	if (get_godotsharp_editor() != nullptr) {
+		get_godotsharp_editor()->call("XogotAssemblyReloaded", true);
+	}
 }
 #endif
 
 #ifdef TOOLS_ENABLED
 Error CSharpLanguage::open_in_external_editor(const Ref<Script> &p_script, int p_line, int p_col) {
-	return (Error)(int)get_godotsharp_editor()->call("OpenInExternalEditor", p_script, p_line, p_col);
+	EditorPlugin *editor = get_godotsharp_editor();
+	ERR_FAIL_NULL_V_MSG(editor, ERR_UNAVAILABLE, ".NET: GodotTools is unavailable. Install a compatible .NET support component and reopen the project.");
+	return (Error)(int)editor->call("OpenInExternalEditor", p_script, p_line, p_col);
 }
 
 bool CSharpLanguage::overrides_external_editor() {
-	return get_godotsharp_editor()->call("OverridesExternalEditor");
+	EditorPlugin *editor = get_godotsharp_editor();
+	if (editor == nullptr) {
+		WARN_PRINT_ONCE(".NET: GodotTools is unavailable. C# source cannot open in the managed editor.");
+		return false;
+	}
+	return editor->call("OverridesExternalEditor");
 }
 #endif
 
@@ -1065,24 +1089,49 @@ bool CSharpLanguage::debug_break(const String &p_error, bool p_allow_continue) {
 
 #ifdef TOOLS_ENABLED
 void CSharpLanguage::_editor_init_callback() {
+	initialize_godotsharp_editor();
+}
+
+bool CSharpLanguage::initialize_godotsharp_editor() {
 	// Load GodotTools and initialize GodotSharpEditor
+	CSharpLanguage *language = get_singleton();
+	ERR_FAIL_NULL_V_MSG(language, false, ".NET: C# language is unavailable while initializing GodotTools");
+
+	if (language->godotsharp_editor != nullptr) {
+		return true;
+	}
+
+	GDMono *mono = language->gdmono;
+	ERR_FAIL_NULL_V_MSG(mono, false, ".NET: Managed runtime is unavailable while initializing GodotTools");
+	ERR_FAIL_COND_V_MSG(!mono->is_runtime_initialized(), false, ".NET: Managed runtime did not initialize before GodotTools startup");
+
+	const gdmono::PluginCallbacks &plugin_callbacks = mono->get_plugin_callbacks();
+	ERR_FAIL_NULL_V_MSG(plugin_callbacks.LoadToolsAssemblyCallback, false, ".NET: GodotPlugins did not provide the GodotTools loader");
 
 	int32_t interop_funcs_size = 0;
 	const void **interop_funcs = godotsharp::get_editor_interop_funcs(interop_funcs_size);
 
-	Object *editor_plugin_obj = GDMono::get_singleton()->get_plugin_callbacks().LoadToolsAssemblyCallback(
+	Object *editor_plugin_obj = plugin_callbacks.LoadToolsAssemblyCallback(
 			GodotSharpDirs::get_data_editor_tools_dir().path_join("GodotTools.dll").utf16().get_data(),
 			interop_funcs, interop_funcs_size);
-	CRASH_COND(editor_plugin_obj == nullptr);
+	ERR_FAIL_NULL_V_MSG(editor_plugin_obj, false, ".NET: GodotTools.dll did not create its editor plugin");
 
 	EditorPlugin *godotsharp_editor = Object::cast_to<EditorPlugin>(editor_plugin_obj);
-	CRASH_COND(godotsharp_editor == nullptr);
+	ERR_FAIL_NULL_V_MSG(godotsharp_editor, false, ".NET: GodotTools.dll returned an invalid editor plugin");
 
 	// Add plugin to EditorNode and enable it
 	EditorNode::add_editor_plugin(godotsharp_editor);
 	godotsharp_editor->enable_plugin();
 
-	get_singleton()->godotsharp_editor = godotsharp_editor;
+	language->godotsharp_editor = godotsharp_editor;
+	print_verbose(".NET: GodotSharp editor initialized");
+	// Xogot must not infer readiness from startup timing. The Swift shell uses
+	// this notification to enable its C# build commands after GodotTools has
+	// installed its editor plugin.
+	if (EditorNode::get_singleton() != nullptr) {
+		EditorNode::get_singleton()->emit_signal(SNAME("callout"), SNAME("dotnet_editor_ready"));
+	}
+	return true;
 }
 #endif
 
@@ -2821,6 +2870,15 @@ Variant CSharpScript::callp(const StringName &p_method, const Variant **p_args, 
 Error CSharpScript::reload(bool p_keep_state) {
 	if (!reload_invalidated) {
 		return OK;
+	}
+
+	// A C# resource can be requested before the optional managed component has
+	// initialized its runtime and callback table. Keep this script invalid so it
+	// can reload later, but never call an uninitialized managed callback.
+	GDMono *mono = GDMono::get_singleton();
+	if (!mono || !mono->is_runtime_initialized() || !GDMonoCache::godot_api_cache_updated ||
+			!GDMonoCache::managed_callbacks.ScriptManagerBridge_AddScriptBridge) {
+		return ERR_UNAVAILABLE;
 	}
 
 	// In the case of C#, reload doesn't really do any script reloading.

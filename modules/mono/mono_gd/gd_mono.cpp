@@ -36,6 +36,7 @@
 #include "../thirdparty/hostfxr.h"
 #include "../utils/path_utils.h"
 #include "gd_mono_cache.h"
+#include "managed_debugger_startup_barrier.h"
 
 #ifdef DEBUG_ENABLED
 #include "core/object/class_db.h"
@@ -612,6 +613,14 @@ godot_plugins_initialize_fn initialize_coreclr_and_godot_plugins(bool &r_runtime
 
 bool GDMono::should_initialize() {
 #ifdef TOOLS_ENABLED
+	// Xogot ships the native Mono integration in its macOS engine but installs
+	// the managed assemblies separately as an optional component. In that mode,
+	// a missing component disables C# without preventing GDScript projects from
+	// opening. Standalone Godot keeps its existing always-initialize behavior.
+	if (OS::get_singleton()->get_environment("XOGOT_OPTIONAL_DOTNET_COMPONENT") == "1") {
+		return DirAccess::exists(GodotSharpDirs::get_api_assemblies_dir()) &&
+				DirAccess::exists(GodotSharpDirs::get_data_editor_tools_dir());
+	}
 	// The editor always needs to initialize the .NET module for now.
 	return true;
 #else
@@ -707,8 +716,11 @@ void GDMono::initialize() {
 	GDMonoCache::update_godot_api_cache(managed_callbacks);
 
 	print_verbose(".NET: GodotPlugins initialized");
-
 	_on_core_api_assembly_loaded();
+
+	String startup_barrier_error;
+	ERR_FAIL_COND_MSG(!gdmono::wait_for_managed_debugger_startup(startup_barrier_error),
+			".NET: Managed debugger startup barrier failed: " + startup_barrier_error + ". The project assembly was not loaded.");
 
 #ifdef TOOLS_ENABLED
 	_try_load_project_assembly();
@@ -770,15 +782,26 @@ bool GDMono::_load_project_assembly() {
 	assembly_path = ProjectSettings::get_singleton()->globalize_path(assembly_path);
 
 	if (!FileAccess::exists(assembly_path)) {
+		ERR_PRINT_ED(".NET: Project assembly is missing: " + assembly_path);
 		return false;
 	}
 
+	print_line("[.NET] Loading project assembly: " + assembly_path);
 	String loaded_assembly_path;
 	bool success = plugin_callbacks.LoadProjectAssemblyCallback(assembly_path.utf16().get_data(), &loaded_assembly_path);
 
 	if (success) {
+		// The managed callback can report success for an already-loaded assembly.
+		// In that case it has no new path to return, but the requested path is
+		// still the path whose timestamp Godot must track.
+		if (loaded_assembly_path.is_empty()) {
+			loaded_assembly_path = assembly_path;
+		}
 		project_assembly_path = loaded_assembly_path.simplify_path();
 		project_assembly_modified_time = FileAccess::get_modified_time(loaded_assembly_path);
+		print_line("[.NET] Project assembly loaded: " + project_assembly_path);
+	} else {
+		ERR_PRINT_ED(".NET: Failed to load project assembly: " + assembly_path);
 	}
 
 	return success;
@@ -864,6 +887,24 @@ void GodotSharp::reload_assemblies() {
 	if (CSharpLanguage::get_singleton()->is_assembly_reloading_needed()) {
 		CSharpLanguage::get_singleton()->reload_assemblies();
 	}
+#endif
+}
+
+void GodotSharp::xogot_reload_assemblies() {
+	// Deliberately skips the `is_assembly_reloading_needed()` gate used above.
+	// An incremental MSBuild that leaves the project assembly timestamp
+	// unchanged makes that gate return false, and the skipped reload never
+	// reaches the XogotAssemblyReloaded callback. Xogot's build coordinator
+	// then waits on the `reloading` state forever and the editor can no longer
+	// build or play. Reloading unconditionally is also what Play needs: the
+	// editor can lack the script registrations for an assembly whose timestamp
+	// did not move (for example when the managed tools started late).
+	//
+	// Only the editor icall reaches this method, and hot reload is always
+	// compiled into editor builds, so the empty body below is unreachable.
+#ifdef GD_MONO_HOT_RELOAD
+	CRASH_COND(CSharpLanguage::get_singleton() == nullptr);
+	CSharpLanguage::get_singleton()->reload_assemblies();
 #endif
 }
 
