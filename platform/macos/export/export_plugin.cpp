@@ -2313,7 +2313,9 @@ Error EditorExportPlatformMacOS::export_project(const Ref<EditorExportPreset> &p
 
 		if (file.begins_with("Contents/MacOS/godot_")) {
 			if (architecture == "universal") {
-				if (file.begins_with("Contents/MacOS/" + binary_to_use_base)) {
+				// Keep every runtime of the requested configuration (".universal",
+				// or the thin ".arm64" and ".x86_64" that are merged below).
+				if (!file.begins_with("Contents/MacOS/" + binary_to_use_base)) {
 					ret = unzGoToNextFile(src_pkg_zip);
 					continue; // skip
 				}
