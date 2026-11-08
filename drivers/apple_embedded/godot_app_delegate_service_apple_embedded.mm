@@ -69,13 +69,32 @@ static __weak GDTViewController *_viewController = nil;
 	_viewController = viewController;
 }
 
+static BOOL godot_started = NO;
+
++ (BOOL)godotStarted {
+	return godot_started;
+}
+
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+	// With `godot_defer_start` in Info.plist, the host app starts Godot later with `startGodotWithArguments:`
+	// (for example, after it has downloaded the game pack).
+	if ([[[[NSBundle mainBundle] infoDictionary] objectForKey:@"godot_defer_start"] boolValue]) {
+		return YES;
+	}
+
 	// TODO: might be required to make an early return, so app wouldn't crash because of timeout.
 	// TODO: logo screen is not displayed while shaders are compiling
 	// DummyViewController(Splash/LoadingViewController) -> setup -> GodotViewController
 
 	// Fetch the command-line arguments from NSProcessInfo
-	NSArray *arguments = [[NSProcessInfo processInfo] arguments];
+	return [self startGodotWithArguments:[[NSProcessInfo processInfo] arguments]];
+}
+
+- (BOOL)startGodotWithArguments:(NSArray<NSString *> *)arguments {
+	if (godot_started) {
+		return YES;
+	}
+
 	gargc = (int)[arguments count];
 	gargv = (char **)malloc(sizeof(char *) * gargc);
 	for (int i = 0; i < gargc; i++) {
@@ -90,6 +109,8 @@ static __weak GDTViewController *_viewController = nil;
 		exit(0);
 		return NO;
 	}
+
+	godot_started = YES;
 
 	[[NSNotificationCenter defaultCenter]
 			addObserver:self
@@ -140,12 +161,18 @@ static __weak GDTViewController *_viewController = nil;
 }
 
 - (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	if (OS::get_singleton()->get_main_loop()) {
 		OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_OS_MEMORY_WARNING);
 	}
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	apple_embedded_finish();
 }
 
@@ -160,40 +187,67 @@ static __weak GDTViewController *_viewController = nil;
 // notification panel by swiping from the upper part of the screen.
 
 - (void)sceneDidDisconnect:(UIScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_focus_out();
 }
 
 - (void)sceneWillEnterForeground:(UIScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
+	if (!godot_started) {
+		return;
+	}
 	// This method is not called on visionOS Compositor Services Immersive Scenes due to a pre-existing issue.
 	OS_AppleEmbedded::get_singleton()->on_exit_background();
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_focus_in();
 }
 
 - (void)sceneWillResignActive:(UIScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
+	if (!godot_started) {
+		return;
+	}
 	// This method is not called on visionOS Compositor Services Immersive Scenes due to a pre-existing issue.
 	OS_AppleEmbedded::get_singleton()->on_focus_out();
 }
 
 - (void)sceneDidEnterBackground:(UIScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_enter_background();
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_exit_background();
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_focus_in();
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_focus_out();
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
+	if (!godot_started) {
+		return;
+	}
 	OS_AppleEmbedded::get_singleton()->on_enter_background();
 }
 
