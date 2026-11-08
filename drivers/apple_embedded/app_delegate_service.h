@@ -38,4 +38,13 @@
 
 @property(strong, class, nonatomic) GDTViewController *viewController;
 
+// YES after `apple_embedded_main()` has run successfully. Before that, the OS singleton does not exist.
+@property(class, readonly, nonatomic) BOOL godotStarted;
+
+// Runs `apple_embedded_main()` with the given arguments (the first one is the executable path) and configures the audio session.
+// `application:didFinishLaunchingWithOptions:` calls this with the process arguments, unless Info.plist has
+// `godot_defer_start` set to true. Then the host app calls it when it is ready (the Xogot App Clip calls it
+// after it has downloaded the game pack, with `--main-pack <path>`, which needs `disable_path_overrides=no`).
+- (BOOL)startGodotWithArguments:(NSArray<NSString *> *)arguments;
+
 @end
